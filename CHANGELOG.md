@@ -1,5 +1,6 @@
 ## 1.6.1 - 2025-07-17
-- Fixes callback being called once in Android (improved handling) (#91)
+- Fixed callback being called once in Android (improved handling) (#91)
+- Fixed "FlutterJNI.loadLibrary/prefetchDefaultFontManager/init called more than once"
 
 ## 1.6.0 - 2025-05-06
 - Updated to use the modern FlutterPlugin.FlutterPluginBinding pattern
