@@ -19,24 +19,54 @@ internal object FlutterBackgroundManager {
     private const val BACKGROUND_CHANNEL_NAME = "com.icapps.background_location_tracker/background_channel"
 
     private val flutterLoader = FlutterLoader()
+    private var backgroundChannel: MethodChannel? = null
+    private var isInitialized = false
+    private var pendingLocation: Location? = null
 
     private fun getInitializedFlutterEngine(ctx: Context): FlutterEngine {
-        Logger.debug("BackgroundManager", "Creating new engine")
+        Logger.debug("BackgroundManager", "Getting Flutter engine")
 
         return BackgroundLocationTrackerPlugin.getFlutterEngine(ctx)
     }
 
     fun sendLocation(ctx: Context, location: Location) {
         Logger.debug("BackgroundManager", "Location: ${location.latitude}: ${location.longitude}")
-        val engine = getInitializedFlutterEngine(ctx)
+        
+        if (isInitialized) {
+            // Engine is already initialized, send location immediately
+            sendLocationToChannel(ctx, location)
+        } else {
+            // Store the location and initialize if needed
+            pendingLocation = location
+            setupBackgroundChannelIfNeeded(ctx)
+        }
+    }
 
-        val backgroundChannel = MethodChannel(engine.dartExecutor, BACKGROUND_CHANNEL_NAME)
-        backgroundChannel.setMethodCallHandler { call, result ->
+    private fun setupBackgroundChannelIfNeeded(ctx: Context) {
+        if (backgroundChannel != null) {
+            return // Already setup
+        }
+
+        Logger.debug("BackgroundManager", "Setting up background channel and dart executor")
+        val engine = getInitializedFlutterEngine(ctx)
+        
+        backgroundChannel = MethodChannel(engine.dartExecutor, BACKGROUND_CHANNEL_NAME)
+        backgroundChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
-                "initialized" -> handleInitialized(call, result, ctx, backgroundChannel, location, engine)
+                "initialized" -> {
+                    Logger.debug("BackgroundManager", "Dart background isolate initialized")
+                    isInitialized = true
+                    result.success(true)
+                    
+                    // Send any pending location
+                    pendingLocation?.let { location ->
+                        Logger.debug("BackgroundManager", "Sending pending location after initialization")
+                        sendLocationToChannel(ctx, location)
+                        pendingLocation = null
+                    }
+                }
                 else -> {
                     result.notImplemented()
-                    engine.destroy()
                 }
             }
         }
@@ -52,7 +82,10 @@ internal object FlutterBackgroundManager {
         }
     }
 
-    private fun handleInitialized(call: MethodCall, result: MethodChannel.Result, ctx: Context, channel: MethodChannel, location: Location, engine: FlutterEngine) {
+    private fun sendLocationToChannel(ctx: Context, location: Location) {
+        val channel = backgroundChannel ?: return
+        Logger.debug("BackgroundManager", "Sending location to initialized channel")
+        
         val data = mutableMapOf<String, Any>()
         data["lat"] = location.latitude
         data["lon"] = location.longitude
@@ -73,19 +106,23 @@ internal object FlutterBackgroundManager {
 
         channel.invokeMethod("onLocationUpdate", data, object : MethodChannel.Result {
             override fun success(result: Any?) {
-                Logger.debug("BackgroundManager", "Got success, destroy engine!")
-                engine.destroy()
+                Logger.debug("BackgroundManager", "Successfully sent location update")
             }
 
             override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
-                Logger.debug("BackgroundManager", "Got error, destroy engine! $errorCode - $errorMessage : $errorDetails")
-                engine.destroy()
+                Logger.debug("BackgroundManager", "Error sending location update: $errorCode - $errorMessage : $errorDetails")
             }
 
             override fun notImplemented() {
-                Logger.debug("BackgroundManager", "Got not implemented, destroy engine!")
-                engine.destroy()
+                Logger.debug("BackgroundManager", "Method not implemented for location update")
             }
         })
+    }
+    
+    fun cleanup() {
+        Logger.debug("BackgroundManager", "Cleaning up background resources")
+        isInitialized = false
+        backgroundChannel = null
+        pendingLocation = null
     }
 }
