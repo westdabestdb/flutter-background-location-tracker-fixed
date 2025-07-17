@@ -1,4 +1,4 @@
-## 1.6.1 - 2025-05-06
+## 1.6.1 - 2025-07-17
 - Fixes callback being called once in Android (#91)
 
 ## 1.6.0 - 2025-05-06
