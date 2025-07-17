@@ -105,6 +105,7 @@ internal class MethodCallHelper(private val ctx: Context) : MethodChannel.Method
 
     private fun stopTracking(ctx: Context, call: MethodCall, result: MethodChannel.Result) {
         serviceConnection.service?.stopTracking()
+        FlutterBackgroundManager.cleanup()
         result.success(true)
     }
 
