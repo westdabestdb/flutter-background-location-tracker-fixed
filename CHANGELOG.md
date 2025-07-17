@@ -1,3 +1,6 @@
+## 1.6.1 - 2025-05-06
+- Fixes callback being called once in Android (#91)
+
 ## 1.6.0 - 2025-05-06
 - Updated to use the modern FlutterPlugin.FlutterPluginBinding pattern
 - Deprecated Registrar, PluginRegistrantCallback, and ShimPluginRegistry usage
