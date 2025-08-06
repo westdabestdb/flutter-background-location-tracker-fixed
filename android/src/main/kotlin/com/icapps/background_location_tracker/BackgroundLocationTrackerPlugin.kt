@@ -42,6 +42,9 @@ class BackgroundLocationTrackerPlugin : FlutterPlugin, MethodCallHandler, Activi
         channel?.setMethodCallHandler(null)
         channel = null
         applicationContext = null
+        
+        // Clean up the background manager when plugin is detached
+        FlutterBackgroundManager.cleanup()
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
@@ -73,6 +76,7 @@ class BackgroundLocationTrackerPlugin : FlutterPlugin, MethodCallHandler, Activi
 
         // New static properties for background execution
         private var flutterEngine: FlutterEngine? = null
+        private var isEngineInitialized = false
 
         // For compatibility with older plugins
         @Deprecated("Use FlutterEngine's plugin registry instead")
@@ -87,9 +91,42 @@ class BackgroundLocationTrackerPlugin : FlutterPlugin, MethodCallHandler, Activi
         // Method to get or create the Flutter engine for background execution
         @JvmStatic
         fun getFlutterEngine(context: Context): FlutterEngine {
-            return flutterEngine ?: FlutterEngine(context).also {
-                flutterEngine = it
-                pluginRegistrantCallback?.invoke(it)
+            synchronized(this) {
+                if (flutterEngine == null || !isEngineInitialized) {
+                    Logger.debug(TAG, "Creating new Flutter engine for background execution")
+                    flutterEngine = FlutterEngine(context).also { engine ->
+                        pluginRegistrantCallback?.invoke(engine)
+                        isEngineInitialized = true
+                        Logger.debug(TAG, "Flutter engine created and initialized")
+                    }
+                } else {
+                    Logger.debug(TAG, "Reusing existing Flutter engine")
+                }
+                return flutterEngine!!
+            }
+        }
+        
+        // Method to properly cleanup the Flutter engine
+        @JvmStatic
+        fun cleanupFlutterEngine() {
+            synchronized(this) {
+                flutterEngine?.let { engine ->
+                    try {
+                        Logger.debug(TAG, "Cleaning up Flutter engine")
+                        // Stop the Dart isolate if it's running
+                        if (engine.dartExecutor.isExecutingDart) {
+                            engine.dartExecutor.onDetachedFromJNI()
+                        }
+                        // Destroy the engine
+                        engine.destroy()
+                        Logger.debug(TAG, "Flutter engine destroyed")
+                    } catch (e: Exception) {
+                        // Log the exception but don't crash
+                        Logger.debug(TAG, "Error during Flutter engine cleanup: ${e.message}")
+                    }
+                    flutterEngine = null
+                    isEngineInitialized = false
+                }
             }
         }
     }
