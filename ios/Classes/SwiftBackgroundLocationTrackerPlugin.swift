@@ -38,6 +38,11 @@ extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
         let instance = SwiftBackgroundLocationTrackerPlugin()
         registrar.addMethodCallDelegate(instance, channel: methodChannel)
         registrar.addApplicationDelegate(instance)
+
+        instance.locationManager.delegate = instance
+        instance.locationManager.requestAlwaysAuthorization()
+        instance.locationManager.startMonitoringSignificantLocationChanges()
+
         
         if (SharedPrefsUtil.isTracking() && SharedPrefsUtil.restartAfterKill()) {
             instance.locationManager.delegate = instance
@@ -47,6 +52,8 @@ extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
     
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         locationManager.delegate = self
+        locationManager.requestAlwaysAuthorization()
+        locationManager.startMonitoringSignificantLocationChanges()
         SwiftBackgroundLocationTrackerPlugin.foregroundChannel?.handle(call, result: result)
     }
     
