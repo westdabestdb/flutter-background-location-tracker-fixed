@@ -99,7 +99,11 @@ public class ForegroundChannel : NSObject {
     }
     
     private func startTracking(_ result: @escaping FlutterResult) {
+        // Set the plugin as the delegate for background processing
+        SwiftBackgroundLocationTrackerPlugin.setLocationManagerDelegate()
+        
         locationManager.startUpdatingLocation()
+        locationManager.startMonitoringSignificantLocationChanges()
         isTracking = true
         SharedPrefsUtil.saveIsTracking(isTracking)
         result(true)
@@ -108,6 +112,11 @@ public class ForegroundChannel : NSObject {
     private func stopTracking(_ result: @escaping FlutterResult) {
         locationManager.stopUpdatingLocation()
         locationManager.stopMonitoringSignificantLocationChanges()
+        locationManager.delegate = nil
+        
+        // Clear the plugin's delegate too
+        SwiftBackgroundLocationTrackerPlugin.clearLocationManagerDelegate()
+        
         isTracking = false
         SharedPrefsUtil.saveIsTracking(isTracking)
         result(true)

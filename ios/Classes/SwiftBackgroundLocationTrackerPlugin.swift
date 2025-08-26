@@ -20,8 +20,28 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
     // This will store the plugin that registered engines
     private static var pluginRegistrants: [(FlutterEngine) -> Void] = []
     
+    // Store the plugin instance for delegate management
+    private static var pluginInstance: SwiftBackgroundLocationTrackerPlugin?
+    
     private let locationManager = LocationManager.shared()
     
+    // Methods to manage the delegate
+    public static func setLocationManagerDelegate() {
+        if let instance = pluginInstance {
+            instance.locationManager.delegate = instance
+        }
+    }
+    
+    public static func clearLocationManagerDelegate() {
+        if let instance = pluginInstance {
+            instance.locationManager.delegate = nil
+        }
+    }
+    
+    // Method to get the plugin instance
+    public static func getPluginInstance() -> SwiftBackgroundLocationTrackerPlugin? {
+        return pluginInstance
+    }
 }
 
 extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
@@ -36,24 +56,26 @@ extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
         foregroundChannel = ForegroundChannel()
         let methodChannel = ForegroundChannel.createMethodChannel(binaryMessenger: registrar.messenger())
         let instance = SwiftBackgroundLocationTrackerPlugin()
+        
+        // Store the plugin instance
+        pluginInstance = instance
+        
         registrar.addMethodCallDelegate(instance, channel: methodChannel)
         registrar.addApplicationDelegate(instance)
 
-        instance.locationManager.delegate = instance
+        // Don't automatically start location services
         instance.locationManager.requestAlwaysAuthorization()
-        instance.locationManager.startMonitoringSignificantLocationChanges()
-
         
+        // Only start if we were tracking before
         if (SharedPrefsUtil.isTracking() && SharedPrefsUtil.restartAfterKill()) {
             instance.locationManager.delegate = instance
+            instance.locationManager.startMonitoringSignificantLocationChanges()
             instance.locationManager.startUpdatingLocation()
         }
     }
     
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-        locationManager.delegate = self
-        locationManager.requestAlwaysAuthorization()
-        locationManager.startMonitoringSignificantLocationChanges()
+        // Don't interfere with location management - let ForegroundChannel handle it
         SwiftBackgroundLocationTrackerPlugin.foregroundChannel?.handle(call, result: result)
     }
     
@@ -126,6 +148,12 @@ extension SwiftBackgroundLocationTrackerPlugin: CLLocationManagerDelegate {
     private static let BACKGROUND_CHANNEL_NAME = "com.icapps.background_location_tracker/background_channel"
     
     public func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        // Only process location updates if we're actually tracking
+        guard SharedPrefsUtil.isTracking() else {
+            CustomLogger.log(message: "Location update received but tracking is disabled, ignoring")
+            return
+        }
+        
         guard let location = locations.last else {
             CustomLogger.log(message: "No location ...")
             return
