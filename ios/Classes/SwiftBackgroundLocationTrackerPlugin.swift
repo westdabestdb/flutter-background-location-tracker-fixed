@@ -40,22 +40,13 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
     
     // Force cleanup method to ensure complete stopping of location services
     public static func forceCleanup() {
-        // Clear all static variables that might hold state
-        initializedBackgroundCallbacks = false
-        initializedBackgroundCallbacksStarted = false
-        locationData = nil
-        
         // CRITICAL: Reset the tracking state in SharedPrefs to prevent auto-restart
         SharedPrefsUtil.saveIsTracking(false)
         
-        // Destroy the Flutter engine if it exists
-        if let engine = flutterEngine {
-            engine.destroyContext()
-            flutterEngine = nil
-        }
-        
-        // Clear the background method channel
-        backgroundMethodChannel = nil
+        // CRITICAL: Don't reset background communication during normal logout
+        // The background engine should stay connected to the main app
+        // Only clear location data cache
+        locationData = nil
         
         // Force cleanup of any background tasks
         if let instance = pluginInstance {
@@ -63,7 +54,31 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
             instance.locationManager.stopMonitoringSignificantLocationChanges()
             instance.locationManager.delegate = nil
         }
+        
+        // CRITICAL: Completely deactivate location manager to remove status bar indicator
+        LocationManager.deactivate()
+        
+        // CRITICAL: Force stop location manager to ensure no more updates are received
+        LocationManager.forceStopLocationManager()
+        
+        CustomLogger.log(message: "Force cleanup completed - location services stopped, background communication preserved")
     }
+    
+
+    
+    // Method for complete cleanup only when app is terminating
+    public static func forceCleanupOnTermination() {
+        // This is the nuclear option - only use when app is actually terminating
+        forceCleanup()
+        
+        // Destroy the Flutter engine completely
+        if let engine = flutterEngine {
+            engine.destroyContext()
+            flutterEngine = nil
+        }
+    }
+    
+
     
     // Method to get the plugin instance
     public static func getPluginInstance() -> SwiftBackgroundLocationTrackerPlugin? {
@@ -81,6 +96,15 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
                SharedPrefsUtil.restartAfterKill() && 
                !initializedBackgroundCallbacksStarted &&
                pluginInstance != nil
+    }
+    
+    // Method to reset initialization state when needed (e.g., after app relaunch)
+    public static func resetInitializationState() {
+        CustomLogger.log(message: "=== RESETTING INITIALIZATION STATE ===")
+        initializedBackgroundCallbacks = false
+        initializedBackgroundCallbacksStarted = false
+        locationData = nil
+        CustomLogger.log(message: "Initialization state reset completed")
     }
 }
 
@@ -105,6 +129,9 @@ extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
 
         // Don't automatically start location services
         instance.locationManager.requestAlwaysAuthorization()
+        
+        // CRITICAL: Reset initialization state on app relaunch to ensure proper reinitialization
+        resetInitializationState()
         
         // Only start if we were tracking before AND restartAfterKill is enabled
         if shouldRestartTracking() {
@@ -189,9 +216,14 @@ extension SwiftBackgroundLocationTrackerPlugin: CLLocationManagerDelegate {
     
     // App lifecycle handling
     public func applicationWillTerminate(_ application: UIApplication) {
-        // Don't cleanup when app is terminating - let tracking continue in background
-        // This is the expected behavior for background location tracking
-        CustomLogger.log(message: "App terminating, but keeping tracking active for background processing")
+        // If tracking is active, keep it running in background
+        if SharedPrefsUtil.isTracking() {
+            CustomLogger.log(message: "App terminating, but keeping tracking active for background processing")
+        } else {
+            // If tracking is stopped, do complete cleanup since app is terminating
+            CustomLogger.log(message: "App terminating and tracking is stopped, doing complete cleanup")
+            SwiftBackgroundLocationTrackerPlugin.forceCleanupOnTermination()
+        }
     }
     
     public func applicationDidEnterBackground(_ application: UIApplication) {
@@ -204,10 +236,87 @@ extension SwiftBackgroundLocationTrackerPlugin: CLLocationManagerDelegate {
         }
     }
     
+    public func applicationDidBecomeActive(_ application: UIApplication) {
+        CustomLogger.log(message: "=== APP DID BECOME ACTIVE ===")
+        
+        // Check if we need to reinitialize background callbacks after app relaunch
+        if SharedPrefsUtil.isTracking() && !SwiftBackgroundLocationTrackerPlugin.initializedBackgroundCallbacks {
+            CustomLogger.log(message: "App relaunched with active tracking, reinitializing background callbacks")
+            
+            // Reinitialize background callbacks
+            if let flutterEngine = SwiftBackgroundLocationTrackerPlugin.getFlutterEngine() {
+                SwiftBackgroundLocationTrackerPlugin.initBackgroundMethodChannel(flutterEngine: flutterEngine)
+                CustomLogger.log(message: "Background callbacks reinitialized after app relaunch")
+            } else {
+                CustomLogger.log(message: "Failed to get Flutter engine for background callback reinitialization")
+            }
+        }
+        
+        // Check if location manager needs reactivation after app relaunch
+        if SharedPrefsUtil.isTracking() && LocationManager.needsReactivation() {
+            CustomLogger.log(message: "App relaunched with active tracking, location manager needs reactivation")
+            
+            // Reactivate location manager
+            LocationManager.reactivateForTracking()
+            
+            // Set delegate and resume tracking
+            if let instance = SwiftBackgroundLocationTrackerPlugin.pluginInstance {
+                instance.locationManager.delegate = instance
+                instance.locationManager.startUpdatingLocation()
+                instance.locationManager.startMonitoringSignificantLocationChanges()
+                
+                CustomLogger.log(message: "Location tracking resumed after app relaunch")
+                CustomLogger.log(message: "Location manager status: \(LocationManager.getCurrentStatus())")
+            }
+        }
+        
+        CustomLogger.log(message: "=== APP DID BECOME ACTIVE COMPLETED ===")
+    }
+    
+    public func applicationWillEnterForeground(_ application: UIApplication) {
+        CustomLogger.log(message: "=== APP WILL ENTER FOREGROUND ===")
+        
+        // Additional check for app foreground transition
+        if SharedPrefsUtil.isTracking() {
+            CustomLogger.log(message: "App entering foreground with active tracking")
+            
+            // Verify tracking is properly configured
+            let isConfigured = LocationManager.isConfiguredForTracking()
+            CustomLogger.log(message: "Tracking verification: isConfigured=\(isConfigured)")
+            
+            if !isConfigured {
+                CustomLogger.log(message: "Tracking not properly configured, attempting to restore")
+                LocationManager.reactivateForTracking()
+                
+                if let instance = SwiftBackgroundLocationTrackerPlugin.pluginInstance {
+                    instance.locationManager.delegate = instance
+                    instance.locationManager.startUpdatingLocation()
+                    instance.locationManager.startMonitoringSignificantLocationChanges()
+                    CustomLogger.log(message: "Tracking restored after entering foreground")
+                }
+            }
+        }
+        
+        CustomLogger.log(message: "=== APP WILL ENTER FOREGROUND COMPLETED ===")
+    }
+    
     public func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        // Only process location updates if we're actually tracking
+        // CRITICAL: If tracking is disabled, we should NOT be receiving location updates at all
         guard SharedPrefsUtil.isTracking() else {
-            CustomLogger.log(message: "Location update received but tracking is disabled, ignoring")
+            CustomLogger.logCritical(message: "🚨 CRITICAL: Location updates still being received after tracking disabled!")
+            CustomLogger.logCritical(message: "This means the location manager is not fully stopped")
+            CustomLogger.logCritical(message: "Current tracking state: \(SharedPrefsUtil.isTracking())")
+            CustomLogger.logCritical(message: "Location manager status: \(LocationManager.getCurrentStatus())")
+            
+            // Force stop the location manager immediately
+            manager.stopUpdatingLocation()
+            manager.stopMonitoringSignificantLocationChanges()
+            manager.delegate = nil
+            
+            // Also force cleanup through our plugin
+            SwiftBackgroundLocationTrackerPlugin.forceCleanup()
+            
+            CustomLogger.logCritical(message: "Forced location manager stop due to unauthorized updates")
             return
         }
         
@@ -223,12 +332,20 @@ extension SwiftBackgroundLocationTrackerPlugin: CLLocationManagerDelegate {
             return
         }
         
+        // Additional safety check: verify location manager is properly configured
+        guard LocationManager.isConfiguredForTracking() else {
+            CustomLogger.logCritical(message: "🚨 WARNING: Location manager not properly configured but receiving updates!")
+            CustomLogger.logCritical(message: "Status: \(LocationManager.getCurrentStatus())")
+            return
+        }
+        
         guard let location = locations.last else {
             CustomLogger.log(message: "No location ...")
             return
         }
         
         CustomLogger.log(message: "NEW LOCATION: \(location.coordinate.latitude): \(location.coordinate.longitude)")
+        CustomLogger.log(message: "Tracking state: \(SharedPrefsUtil.isTracking()), Manager configured: \(LocationManager.isConfiguredForTracking())")
         
         var locationData: [String: Any] = [
             "lat": location.coordinate.latitude,

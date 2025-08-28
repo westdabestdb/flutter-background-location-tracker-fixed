@@ -99,45 +99,96 @@ public class ForegroundChannel : NSObject {
     }
     
     private func startTracking(_ result: @escaping FlutterResult) {
-        // Set the plugin as the delegate for background processing
-        SwiftBackgroundLocationTrackerPlugin.setLocationManagerDelegate()
+        CustomLogger.logCritical(message: "=== START TRACKING STARTED ===")
+        CustomLogger.logAlways(message: "Current location manager status: \(LocationManager.getCurrentStatus())")
+        CustomLogger.logAlways(message: "Status bar indicator should be visible: \(LocationManager.shouldShowStatusBarIndicator())")
+        CustomLogger.logAlways(message: "needsReactivation check: \(LocationManager.needsReactivation())")
         
-        locationManager.startUpdatingLocation()
-        locationManager.startMonitoringSignificantLocationChanges()
+        // CRITICAL: Always reactivate after logout to ensure proper tracking
+        CustomLogger.log(message: "Forcing location manager reactivation for tracking")
+        LocationManager.reactivateForTracking()
+        CustomLogger.log(message: "After reactivation: \(LocationManager.getCurrentStatus())")
+        
+        // CRITICAL: Set tracking state BEFORE setting delegate
         isTracking = true
         SharedPrefsUtil.saveIsTracking(isTracking)
+        
+        // CRITICAL: Force UserDefaults sync to ensure immediate persistence
+        UserDefaults.standard.synchronize()
+        
+        // CRITICAL: Set the plugin as the delegate AFTER reactivation and state setting
+        SwiftBackgroundLocationTrackerPlugin.setLocationManagerDelegate()
+        
+        // Start location services with restored settings
+        locationManager.startUpdatingLocation()
+        locationManager.startMonitoringSignificantLocationChanges()
+        
+        // CRITICAL: Verify that tracking is properly configured
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            let isProperlyConfigured = LocationManager.isConfiguredForTracking()
+            CustomLogger.log(message: "Tracking verification: isProperlyConfigured=\(isProperlyConfigured)")
+            
+            if !isProperlyConfigured {
+                CustomLogger.logCritical(message: "🚨 WARNING: Location manager not properly configured after startTracking!")
+                CustomLogger.logCritical(message: "Status: \(LocationManager.getCurrentStatus())")
+            }
+        }
+        
+        CustomLogger.log(message: "Location tracking started with settings: accuracy=\(locationManager.desiredAccuracy), distanceFilter=\(locationManager.distanceFilter)")
+        CustomLogger.log(message: LocationManager.getCurrentStatus())
+        CustomLogger.log(message: "Status bar indicator should be visible: \(LocationManager.shouldShowStatusBarIndicator())")
+        
+        // Simple verification that location services are running
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self = self else { return }
+            
+            CustomLogger.log(message: "=== VERIFICATION: LOCATION SERVICES STATUS ===")
+            CustomLogger.log(message: "Tracking state: \(SharedPrefsUtil.isTracking())")
+            CustomLogger.log(message: "Location manager status: \(LocationManager.getCurrentStatus())")
+            CustomLogger.log(message: "Status bar indicator should be visible: \(LocationManager.shouldShowStatusBarIndicator())")
+        }
+        
+        CustomLogger.log(message: "=== START TRACKING COMPLETED ===")
         result(true)
     }
     
     private func stopTracking(_ result: @escaping FlutterResult) {
-        // First, clear the tracking state to prevent any new location processing
-        isTracking = false
+        CustomLogger.logCritical(message: "=== STOP TRACKING STARTED ===")
+        CustomLogger.logAlways(message: "Current location manager status: \(LocationManager.getCurrentStatus())")
         
-        // CRITICAL: Immediately persist the tracking state change
-        SharedPrefsUtil.saveIsTracking(isTracking)
+        // CRITICAL: Clear delegate FIRST to prevent any new location callbacks
+        locationManager.delegate = nil
+        SwiftBackgroundLocationTrackerPlugin.clearLocationManagerDelegate()
         
-        // Force a UserDefaults sync to ensure immediate persistence
-        UserDefaults.standard.synchronize()
+        CustomLogger.log(message: "Delegates cleared to prevent new location callbacks")
         
-        // Stop all location services
+        // CRITICAL: Stop all location services and remove from system's active requests
         locationManager.stopUpdatingLocation()
         locationManager.stopMonitoringSignificantLocationChanges()
         
-        // Clear all delegates to ensure no more callbacks
-        locationManager.delegate = nil
+        CustomLogger.log(message: "Location services stopped")
         
-        // Clear the plugin's delegate too
-        SwiftBackgroundLocationTrackerPlugin.clearLocationManagerDelegate()
+        // CRITICAL: Clear tracking state AFTER stopping services and clearing delegate
+        isTracking = false
+        SharedPrefsUtil.saveIsTracking(isTracking)
+        UserDefaults.standard.synchronize()
         
-        // Force cleanup of any background processing
-        SwiftBackgroundLocationTrackerPlugin.forceCleanup()
+        CustomLogger.log(message: "Tracking state cleared and persisted")
         
-        // Additional safety: ensure location manager is completely reset
-        locationManager.allowsBackgroundLocationUpdates = false
+        // Use the deactivate method for complete cleanup and status bar indicator removal
+        LocationManager.deactivate()
         
-        // Use the reset method for complete cleanup
-        LocationManager.reset()
+        CustomLogger.log(message: "Location manager deactivated")
+        CustomLogger.log(message: "Final location manager status: \(LocationManager.getCurrentStatus())")
+        CustomLogger.log(message: "Status bar indicator should be visible: \(LocationManager.shouldShowStatusBarIndicator())")
         
+        // CRITICAL: Force cleanup after a small delay to ensure all queued updates are processed
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            SwiftBackgroundLocationTrackerPlugin.forceCleanup()
+            CustomLogger.log(message: "Force cleanup completed after delay")
+        }
+        
+        CustomLogger.log(message: "=== STOP TRACKING COMPLETED ===")
         result(true)
     }
     
