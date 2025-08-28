@@ -28,4 +28,13 @@ class LocationManager {
     class func shared() -> CLLocationManager {
         return sharedLocationManager
     }
+    
+    // Method to completely reset the location manager state
+    class func reset() {
+        let manager = sharedLocationManager
+        manager.stopUpdatingLocation()
+        manager.stopMonitoringSignificantLocationChanges()
+        manager.delegate = nil
+        manager.allowsBackgroundLocationUpdates = false
+    }
 }

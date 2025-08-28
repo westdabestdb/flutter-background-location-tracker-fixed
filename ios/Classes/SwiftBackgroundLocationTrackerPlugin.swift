@@ -38,6 +38,30 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
         }
     }
     
+    // Force cleanup method to ensure complete stopping of location services
+    public static func forceCleanup() {
+        // Clear all static variables that might hold state
+        initializedBackgroundCallbacks = false
+        initializedBackgroundCallbacksStarted = false
+        locationData = nil
+        
+        // Destroy the Flutter engine if it exists
+        if let engine = flutterEngine {
+            engine.destroyContext()
+            flutterEngine = nil
+        }
+        
+        // Clear the background method channel
+        backgroundMethodChannel = nil
+        
+        // Force cleanup of any background tasks
+        if let instance = pluginInstance {
+            instance.locationManager.stopUpdatingLocation()
+            instance.locationManager.stopMonitoringSignificantLocationChanges()
+            instance.locationManager.delegate = nil
+        }
+    }
+    
     // Method to get the plugin instance
     public static func getPluginInstance() -> SwiftBackgroundLocationTrackerPlugin? {
         return pluginInstance
@@ -147,10 +171,39 @@ fileprivate enum BackgroundMethods: String {
 extension SwiftBackgroundLocationTrackerPlugin: CLLocationManagerDelegate {
     private static let BACKGROUND_CHANNEL_NAME = "com.icapps.background_location_tracker/background_channel"
     
+    // App lifecycle handling
+    public func applicationWillTerminate(_ application: UIApplication) {
+        // Don't cleanup when app is terminating - let tracking continue in background
+        // This is the expected behavior for background location tracking
+        CustomLogger.log(message: "App terminating, but keeping tracking active for background processing")
+    }
+    
+    public func applicationDidEnterBackground(_ application: UIApplication) {
+        // If tracking is stopped, ensure complete cleanup
+        if !SharedPrefsUtil.isTracking() {
+            CustomLogger.log(message: "App entering background and tracking is stopped, cleaning up")
+            SwiftBackgroundLocationTrackerPlugin.forceCleanup()
+        } else {
+            CustomLogger.log(message: "App entering background but tracking is active, keeping it running")
+        }
+    }
+    
     public func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         // Only process location updates if we're actually tracking
         guard SharedPrefsUtil.isTracking() else {
             CustomLogger.log(message: "Location update received but tracking is disabled, ignoring")
+            return
+        }
+        
+        // Additional safety check: verify the location manager still has a delegate
+        guard manager.delegate != nil else {
+            CustomLogger.log(message: "Location manager delegate is nil, ignoring update")
+            return
+        }
+        
+        // Additional safety check: verify we're still the delegate
+        guard manager.delegate === self else {
+            CustomLogger.log(message: "We are no longer the delegate, ignoring update")
             return
         }
         

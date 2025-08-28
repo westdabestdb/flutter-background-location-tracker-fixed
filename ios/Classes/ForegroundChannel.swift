@@ -110,15 +110,29 @@ public class ForegroundChannel : NSObject {
     }
     
     private func stopTracking(_ result: @escaping FlutterResult) {
+        // First, clear the tracking state to prevent any new location processing
+        isTracking = false
+        SharedPrefsUtil.saveIsTracking(isTracking)
+        
+        // Stop all location services
         locationManager.stopUpdatingLocation()
         locationManager.stopMonitoringSignificantLocationChanges()
+        
+        // Clear all delegates to ensure no more callbacks
         locationManager.delegate = nil
         
         // Clear the plugin's delegate too
         SwiftBackgroundLocationTrackerPlugin.clearLocationManagerDelegate()
         
-        isTracking = false
-        SharedPrefsUtil.saveIsTracking(isTracking)
+        // Force cleanup of any background processing
+        SwiftBackgroundLocationTrackerPlugin.forceCleanup()
+        
+        // Additional safety: ensure location manager is completely reset
+        locationManager.allowsBackgroundLocationUpdates = false
+        
+        // Use the reset method for complete cleanup
+        LocationManager.reset()
+        
         result(true)
     }
     
