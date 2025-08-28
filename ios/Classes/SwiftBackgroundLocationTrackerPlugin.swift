@@ -45,6 +45,9 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
         initializedBackgroundCallbacksStarted = false
         locationData = nil
         
+        // CRITICAL: Reset the tracking state in SharedPrefs to prevent auto-restart
+        SharedPrefsUtil.saveIsTracking(false)
+        
         // Destroy the Flutter engine if it exists
         if let engine = flutterEngine {
             engine.destroyContext()
@@ -65,6 +68,19 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
     // Method to get the plugin instance
     public static func getPluginInstance() -> SwiftBackgroundLocationTrackerPlugin? {
         return pluginInstance
+    }
+    
+    // Helper method to safely check if tracking should be restarted
+    private static func shouldRestartTracking() -> Bool {
+        // Only restart if:
+        // 1. Tracking was previously enabled
+        // 2. Restart after kill is enabled
+        // 3. We're not in the middle of cleanup
+        // 4. The plugin instance exists
+        return SharedPrefsUtil.isTracking() && 
+               SharedPrefsUtil.restartAfterKill() && 
+               !initializedBackgroundCallbacksStarted &&
+               pluginInstance != nil
     }
 }
 
@@ -90,8 +106,8 @@ extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
         // Don't automatically start location services
         instance.locationManager.requestAlwaysAuthorization()
         
-        // Only start if we were tracking before
-        if (SharedPrefsUtil.isTracking() && SharedPrefsUtil.restartAfterKill()) {
+        // Only start if we were tracking before AND restartAfterKill is enabled
+        if shouldRestartTracking() {
             instance.locationManager.delegate = instance
             instance.locationManager.startMonitoringSignificantLocationChanges()
             instance.locationManager.startUpdatingLocation()

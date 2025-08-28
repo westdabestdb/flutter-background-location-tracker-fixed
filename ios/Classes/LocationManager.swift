@@ -36,5 +36,10 @@ class LocationManager {
         manager.stopMonitoringSignificantLocationChanges()
         manager.delegate = nil
         manager.allowsBackgroundLocationUpdates = false
+        
+        // Additional safety: reset other location manager properties
+        manager.distanceFilter = kCLDistanceFilterNone
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.pausesLocationUpdatesAutomatically = true
     }
 }

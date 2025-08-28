@@ -112,7 +112,12 @@ public class ForegroundChannel : NSObject {
     private func stopTracking(_ result: @escaping FlutterResult) {
         // First, clear the tracking state to prevent any new location processing
         isTracking = false
+        
+        // CRITICAL: Immediately persist the tracking state change
         SharedPrefsUtil.saveIsTracking(isTracking)
+        
+        // Force a UserDefaults sync to ensure immediate persistence
+        UserDefaults.standard.synchronize()
         
         // Stop all location services
         locationManager.stopUpdatingLocation()
