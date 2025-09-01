@@ -45,6 +45,8 @@ class LocationManager {
         // Force iOS to stop all location requests
         if #available(iOS 14.0, *) {
             manager.desiredAccuracy = kCLLocationAccuracyReduced
+        } else {
+            manager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
         }
     }
     
@@ -75,6 +77,8 @@ class LocationManager {
         // Additional safety: ensure no background processing
         if #available(iOS 14.0, *) {
             manager.desiredAccuracy = kCLLocationAccuracyReduced
+        } else {
+            manager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
         }
         
         // CRITICAL: Force one more stop after setting low accuracy
@@ -143,8 +147,11 @@ class LocationManager {
     // Method to check if location manager needs reactivation
     class func needsReactivation() -> Bool {
         let manager = sharedLocationManager
-        return manager.desiredAccuracy == kCLLocationAccuracyThreeKilometers ||
-               manager.desiredAccuracy == kCLLocationAccuracyReduced ||
+        var hasLowAccuracy = manager.desiredAccuracy == kCLLocationAccuracyThreeKilometers
+        if #available(iOS 14.0, *) {
+            hasLowAccuracy = hasLowAccuracy || manager.desiredAccuracy == kCLLocationAccuracyReduced
+        }
+        return hasLowAccuracy ||
                manager.distanceFilter == CLLocationDistanceMax ||
                !manager.allowsBackgroundLocationUpdates
     }
@@ -162,8 +169,11 @@ class LocationManager {
         // 1. Location services are active (not stopped)
         // 2. Accuracy is not at lowest level
         // 3. Background updates are enabled
-        return manager.desiredAccuracy != kCLLocationAccuracyThreeKilometers &&
-               manager.desiredAccuracy != kCLLocationAccuracyReduced &&
+        var hasLowAccuracy = manager.desiredAccuracy == kCLLocationAccuracyThreeKilometers
+        if #available(iOS 14.0, *) {
+            hasLowAccuracy = hasLowAccuracy || manager.desiredAccuracy == kCLLocationAccuracyReduced
+        }
+        return !hasLowAccuracy &&
                manager.allowsBackgroundLocationUpdates &&
                manager.delegate != nil
     }
@@ -172,8 +182,11 @@ class LocationManager {
     class func isLocationManagerStopped() -> Bool {
         let manager = sharedLocationManager
         // Check if location manager is in a stopped state
-        return manager.desiredAccuracy == kCLLocationAccuracyThreeKilometers ||
-               manager.desiredAccuracy == kCLLocationAccuracyReduced ||
+        var hasLowAccuracy = manager.desiredAccuracy == kCLLocationAccuracyThreeKilometers
+        if #available(iOS 14.0, *) {
+            hasLowAccuracy = hasLowAccuracy || manager.desiredAccuracy == kCLLocationAccuracyReduced
+        }
+        return hasLowAccuracy ||
                manager.distanceFilter == CLLocationDistanceMax ||
                !manager.allowsBackgroundLocationUpdates
     }
@@ -226,5 +239,98 @@ class LocationManager {
                manager.desiredAccuracy == kCLLocationAccuracyThreeKilometers
     }
     
+    // Method to completely restore location manager state for tracking after app restart
+    class func restoreForTracking() {
+        CustomLogger.logCritical(message: "🚨 RESTORING LOCATION MANAGER FOR TRACKING AFTER APP RESTART")
+        let manager = sharedLocationManager
+        
+        CustomLogger.log(message: "Before restoration: \(getCurrentStatus())")
+        
+        // CRITICAL: First ensure we're completely stopped to avoid conflicts
+        manager.stopUpdatingLocation()
+        manager.stopMonitoringSignificantLocationChanges()
+        
+        // Clear any existing delegate
+        manager.delegate = nil
+        
+        // Restore the original tracking settings from SharedPrefs
+        manager.activityType = SharedPrefsUtil.activityType()
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.distanceFilter = SharedPrefsUtil.distanceFilter()
+        manager.pausesLocationUpdatesAutomatically = false
+        
+        // Enable background location updates for tracking
+        if #available(iOS 9.0, *) {
+            manager.allowsBackgroundLocationUpdates = true
+        }
+        
+        // Show background location indicator
+        if #available(iOS 11, *) {
+            manager.showsBackgroundLocationIndicator = true
+        }
+        
+        // CRITICAL: Force a small delay to ensure iOS processes the settings change
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            CustomLogger.log(message: "Verifying restoration settings...")
+            CustomLogger.log(message: "Final status: \(getCurrentStatus())")
+            CustomLogger.log(message: "isConfiguredForTracking: \(isConfiguredForTracking())")
+            CustomLogger.log(message: "areLocationServicesRunning: \(areLocationServicesRunning())")
+        }
+        
+        CustomLogger.log(message: "After restoration: \(getCurrentStatus())")
+        CustomLogger.log(message: "Location manager restored with tracking settings: accuracy=\(manager.desiredAccuracy), distanceFilter=\(manager.distanceFilter), activityType=\(manager.activityType.rawValue)")
+        CustomLogger.log(message: "Status bar indicator should be visible: \(shouldShowStatusBarIndicator())")
+        CustomLogger.logCritical(message: "🚨 RESTORATION COMPLETED")
+    }
+    
+    // Method to check if location manager needs restoration after app restart
+    class func needsRestoration() -> Bool {
+        let manager = sharedLocationManager
+        let needsReactivation = needsReactivation()
+        let isConfigured = isConfiguredForTracking()
+        let isRunning = areLocationServicesRunning()
+        
+        // Need restoration if any of these conditions are true:
+        // 1. Needs reactivation (basic settings are wrong)
+        // 2. Not properly configured for tracking
+        // 3. Location services are not running
+        // 4. No delegate is set
+        return needsReactivation || !isConfigured || !isRunning || manager.delegate == nil
+    }
+    
+    // Method to perform complete health check of location manager
+    class func performHealthCheck() -> (isHealthy: Bool, issues: [String]) {
+        var issues: [String] = []
+        let manager = sharedLocationManager
+        
+        // Check authorization status
+        let authStatus = CLLocationManager.authorizationStatus()
+        if authStatus != .authorizedAlways && authStatus != .authorizedWhenInUse {
+            issues.append("Location authorization not granted: \(authStatus.rawValue)")
+        }
+        
+        // Check configuration
+        if !isConfiguredForTracking() {
+            issues.append("Location manager not properly configured for tracking")
+        }
+        
+        // Check if services are running
+        if !areLocationServicesRunning() {
+            issues.append("Location services are not running")
+        }
+        
+        // Check delegate
+        if manager.delegate == nil {
+            issues.append("No delegate set on location manager")
+        }
+        
+        // Check if needs reactivation
+        if needsReactivation() {
+            issues.append("Location manager needs reactivation")
+        }
+        
+        let isHealthy = issues.isEmpty
+        return (isHealthy: isHealthy, issues: issues)
+    }
 
 }

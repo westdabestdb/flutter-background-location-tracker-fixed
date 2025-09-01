@@ -106,6 +106,81 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
         locationData = nil
         CustomLogger.log(message: "Initialization state reset completed")
     }
+
+    // Method to completely restore location tracking state after app restart
+    public static func restoreLocationTrackingState() {
+        CustomLogger.log(message: "=== RESTORING LOCATION TRACKING STATE AFTER APP RESTART ===")
+        
+        // Check if we should even attempt restoration
+        guard SharedPrefsUtil.isTracking() else {
+            CustomLogger.log(message: "No tracking state to restore")
+            return
+        }
+        
+        // Perform health check to identify issues
+        let healthCheck = LocationManager.performHealthCheck()
+        CustomLogger.log(message: "Health check result: isHealthy=\(healthCheck.isHealthy)")
+        if !healthCheck.isHealthy {
+            CustomLogger.log(message: "Issues found: \(healthCheck.issues)")
+        }
+        
+        // Check if restoration is needed
+        if LocationManager.needsRestoration() {
+            CustomLogger.log(message: "Location manager needs restoration, proceeding...")
+            
+            // Verify location permissions
+            let authStatus = CLLocationManager.authorizationStatus()
+            CustomLogger.log(message: "Location authorization status: \(authStatus.rawValue)")
+            
+            if authStatus == .authorizedAlways || authStatus == .authorizedWhenInUse {
+                CustomLogger.log(message: "Permissions verified, performing restoration")
+                
+                // Perform complete restoration
+                LocationManager.restoreForTracking()
+                
+                // Set delegate
+                if let instance = pluginInstance {
+                    instance.locationManager.delegate = instance
+                    CustomLogger.log(message: "Delegate set after restoration")
+                }
+                
+                // Verify restoration was successful
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    let postRestorationHealth = LocationManager.performHealthCheck()
+                    CustomLogger.log(message: "Post-restoration health check: isHealthy=\(postRestorationHealth.isHealthy)")
+                    
+                    if postRestorationHealth.isHealthy {
+                        CustomLogger.log(message: "✅ Location tracking state restoration successful!")
+                        
+                        // Start location services
+                        if let instance = pluginInstance {
+                            instance.locationManager.startUpdatingLocation()
+                            instance.locationManager.startMonitoringSignificantLocationChanges()
+                            CustomLogger.log(message: "Location services started after restoration")
+                        }
+                    } else {
+                        CustomLogger.logCritical(message: "🚨 CRITICAL: Location tracking state restoration failed!")
+                        CustomLogger.logCritical(message: "Issues: \(postRestorationHealth.issues)")
+                        
+                        // Force cleanup if restoration failed
+                        SharedPrefsUtil.saveIsTracking(false)
+                        forceCleanup()
+                    }
+                }
+            } else {
+                CustomLogger.logCritical(message: "🚨 WARNING: Cannot restore tracking without location permissions!")
+                CustomLogger.logCritical(message: "Authorization status: \(authStatus.rawValue)")
+                
+                // Clear tracking state since we can't restore it
+                SharedPrefsUtil.saveIsTracking(false)
+                forceCleanup()
+            }
+        } else {
+            CustomLogger.log(message: "Location manager is healthy, no restoration needed")
+        }
+        
+        CustomLogger.log(message: "=== LOCATION TRACKING STATE RESTORATION COMPLETED ===")
+    }
 }
 
 extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
@@ -239,35 +314,12 @@ extension SwiftBackgroundLocationTrackerPlugin: CLLocationManagerDelegate {
     public func applicationDidBecomeActive(_ application: UIApplication) {
         CustomLogger.log(message: "=== APP DID BECOME ACTIVE ===")
         
-        // Check if we need to reinitialize background callbacks after app relaunch
-        if SharedPrefsUtil.isTracking() && !SwiftBackgroundLocationTrackerPlugin.initializedBackgroundCallbacks {
-            CustomLogger.log(message: "App relaunched with active tracking, reinitializing background callbacks")
+        // CRITICAL: Use the new comprehensive restoration method for app restart scenarios
+        if SharedPrefsUtil.isTracking() {
+            CustomLogger.log(message: "App became active with tracking enabled, checking if restoration is needed")
             
-            // Reinitialize background callbacks
-            if let flutterEngine = SwiftBackgroundLocationTrackerPlugin.getFlutterEngine() {
-                SwiftBackgroundLocationTrackerPlugin.initBackgroundMethodChannel(flutterEngine: flutterEngine)
-                CustomLogger.log(message: "Background callbacks reinitialized after app relaunch")
-            } else {
-                CustomLogger.log(message: "Failed to get Flutter engine for background callback reinitialization")
-            }
-        }
-        
-        // Check if location manager needs reactivation after app relaunch
-        if SharedPrefsUtil.isTracking() && LocationManager.needsReactivation() {
-            CustomLogger.log(message: "App relaunched with active tracking, location manager needs reactivation")
-            
-            // Reactivate location manager
-            LocationManager.reactivateForTracking()
-            
-            // Set delegate and resume tracking
-            if let instance = SwiftBackgroundLocationTrackerPlugin.pluginInstance {
-                instance.locationManager.delegate = instance
-                instance.locationManager.startUpdatingLocation()
-                instance.locationManager.startMonitoringSignificantLocationChanges()
-                
-                CustomLogger.log(message: "Location tracking resumed after app relaunch")
-                CustomLogger.log(message: "Location manager status: \(LocationManager.getCurrentStatus())")
-            }
+            // Use the comprehensive restoration method
+            SwiftBackgroundLocationTrackerPlugin.restoreLocationTrackingState()
         }
         
         CustomLogger.log(message: "=== APP DID BECOME ACTIVE COMPLETED ===")

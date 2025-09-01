@@ -104,6 +104,18 @@ public class ForegroundChannel : NSObject {
         CustomLogger.logAlways(message: "Status bar indicator should be visible: \(LocationManager.shouldShowStatusBarIndicator())")
         CustomLogger.logAlways(message: "needsReactivation check: \(LocationManager.needsReactivation())")
         
+        // CRITICAL: Check if this is a restoration attempt after app restart
+        let isRestorationAttempt = SharedPrefsUtil.isTracking() && LocationManager.needsRestoration()
+        if isRestorationAttempt {
+            // Use the comprehensive restoration method for app restart scenarios
+            SwiftBackgroundLocationTrackerPlugin.restoreLocationTrackingState()
+            
+            // For restoration, we don't need to set the tracking state again since it's already set
+            // Just return success and let the restoration process handle everything
+            result(true)
+            return
+        }
+        
         // CRITICAL: Always reactivate after logout to ensure proper tracking
         CustomLogger.log(message: "Forcing location manager reactivation for tracking")
         LocationManager.reactivateForTracking()
@@ -194,6 +206,6 @@ public class ForegroundChannel : NSObject {
     
     private func isTracking(_ result: @escaping FlutterResult) {
         SharedPrefsUtil.saveIsTracking(isTracking)
-        return result(isTracking)
+        result(isTracking)
     }
 }
