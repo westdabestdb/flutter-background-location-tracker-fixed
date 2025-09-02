@@ -40,13 +40,17 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
     
     // Force cleanup method to ensure complete stopping of location services
     public static func forceCleanup() {
+        CustomLogger.logCritical(message: "🚨 FORCE CLEANUP STARTED - COMPLETE LOCATION SERVICES SHUTDOWN")
+        
         // CRITICAL: Reset the tracking state in SharedPrefs to prevent auto-restart
         SharedPrefsUtil.saveIsTracking(false)
         
-        // CRITICAL: Don't reset background communication during normal logout
-        // The background engine should stay connected to the main app
-        // Only clear location data cache
+        // CRITICAL: Clear location data cache
         locationData = nil
+        
+        // CRITICAL: Reset initialization state to prevent background engine from restarting
+        initializedBackgroundCallbacks = false
+        initializedBackgroundCallbacksStarted = false
         
         // Force cleanup of any background tasks
         if let instance = pluginInstance {
@@ -61,7 +65,18 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
         // CRITICAL: Force stop location manager to ensure no more updates are received
         LocationManager.forceStopLocationManager()
         
-        CustomLogger.log(message: "Force cleanup completed - location services stopped, background communication preserved")
+        // CRITICAL: Destroy the background Flutter engine to prevent battery drain
+        // This ensures no background processes can restart location services
+        if let engine = flutterEngine {
+            CustomLogger.logCritical(message: "🚨 DESTROYING BACKGROUND FLUTTER ENGINE TO PREVENT BATTERY DRAIN")
+            engine.destroyContext()
+            flutterEngine = nil
+        }
+        
+        // CRITICAL: Clear background method channel to prevent any communication
+        backgroundMethodChannel = nil
+        
+        CustomLogger.logCritical(message: "🚨 FORCE CLEANUP COMPLETED - ALL LOCATION SERVICES AND BACKGROUND PROCESSES STOPPED")
     }
     
 
@@ -69,13 +84,8 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
     // Method for complete cleanup only when app is terminating
     public static func forceCleanupOnTermination() {
         // This is the nuclear option - only use when app is actually terminating
+        // forceCleanup() now handles engine destruction, so just call it
         forceCleanup()
-        
-        // Destroy the Flutter engine completely
-        if let engine = flutterEngine {
-            engine.destroyContext()
-            flutterEngine = nil
-        }
     }
     
 
@@ -104,6 +114,10 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
         initializedBackgroundCallbacks = false
         initializedBackgroundCallbacksStarted = false
         locationData = nil
+        
+        // CRITICAL: Also clear background method channel to ensure clean state
+        backgroundMethodChannel = nil
+        
         CustomLogger.log(message: "Initialization state reset completed")
     }
 
@@ -239,6 +253,11 @@ extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
                     registrant(flutterEngine)
                 }
                 self.flutterEngine = flutterEngine
+                
+                // CRITICAL: Initialize the background method channel immediately after engine creation
+                // This ensures the background callback is set up before any location updates
+                initBackgroundMethodChannel(flutterEngine: flutterEngine)
+                CustomLogger.log(message: "Background method channel initialized immediately after engine creation")
             } else {
                 CustomLogger.log(message: "FlutterEngine.run returned `false` we will cleanup the flutterEngine")
                 flutterEngine.destroyContext()
@@ -426,11 +445,12 @@ extension SwiftBackgroundLocationTrackerPlugin: CLLocationManagerDelegate {
             if !SwiftBackgroundLocationTrackerPlugin.initializedBackgroundCallbacksStarted {
                 SwiftBackgroundLocationTrackerPlugin.initializedBackgroundCallbacksStarted = true
             
+                // Create the Flutter engine - the background method channel will be initialized automatically
                 guard let flutterEngine = SwiftBackgroundLocationTrackerPlugin.getFlutterEngine() else {
                     CustomLogger.log(message: "No Flutter engine available ...")
                     return
                 }
-                SwiftBackgroundLocationTrackerPlugin.initBackgroundMethodChannel(flutterEngine: flutterEngine)
+                CustomLogger.log(message: "Flutter engine created, background channel should be ready")
             }
         }
     }
