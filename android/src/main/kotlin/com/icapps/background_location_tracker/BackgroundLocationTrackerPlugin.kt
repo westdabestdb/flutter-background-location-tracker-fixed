@@ -244,13 +244,3 @@ class BackgroundLocationTrackerPlugin : FlutterPlugin, MethodCallHandler, Activi
         }
     }
 }
-
-/**
- * Extension function to add cleanup method to MethodCallHelper if needed.
- * This should be implemented in the MethodCallHelper class.
- */
-private fun MethodCallHelper.cleanup() {
-    // This method should be implemented in MethodCallHelper class
-    // to clean up any resources, listeners, or observers
-    Logger.debug("MethodCallHelper", "Cleanup called")
-}

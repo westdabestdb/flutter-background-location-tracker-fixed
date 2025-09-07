@@ -9,6 +9,7 @@ import android.location.Location
 import android.os.IBinder
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.icapps.background_location_tracker.receiver.LocationReceiver
+import com.icapps.background_location_tracker.utils.Logger
 
 internal class LocationServiceConnection(private val listener: LocationUpdateListener) : ServiceConnection {
     var service: LocationUpdatesService? = null
@@ -29,6 +30,13 @@ internal class LocationServiceConnection(private val listener: LocationUpdateLis
     fun bound(ctx: Context) {
         if (!bound) {
             ctx.bindService(Intent(ctx, LocationUpdatesService::class.java), this, Context.BIND_AUTO_CREATE)
+        } else {
+            // If we think we're bound but service is null, we need to rebind
+            if (service == null) {
+                Logger.debug("LocationServiceConnection", "Service is null but bound=true, rebinding")
+                bound = false
+                ctx.bindService(Intent(ctx, LocationUpdatesService::class.java), this, Context.BIND_AUTO_CREATE)
+            }
         }
     }
 

@@ -99,13 +99,27 @@ internal class MethodCallHelper(private val ctx: Context) : MethodChannel.Method
                                                    enableNotificationLocationUpdates ?: SharedPrefsUtil.isNotificationLocationUpdatesEnabled(ctx),
                                                    enableCancelTrackingAction ?: SharedPrefsUtil.isCancelTrackingActionEnabled(ctx))
         }
+        
+        // Persist tracking intent BEFORE starting the service so a freshly created
+        // service (after logout -> stopSelf) will auto-start in onCreate()
+        SharedPrefsUtil.saveIsTracking(ctx, true)
+
+        // Start the service immediately to avoid timing issues
+        com.icapps.background_location_tracker.service.LocationUpdatesService.startServiceImmediately(ctx)
+        
+        // Ensure service connection is established and start tracking
+        serviceConnection.bound(ctx)
+        
+        // Try to start tracking through service connection
         serviceConnection.service?.startTracking()
         result.success(true)
     }
 
     private fun stopTracking(ctx: Context, call: MethodCall, result: MethodChannel.Result) {
+        // Persist stop intent immediately in case the service isn't currently bound/running
+        SharedPrefsUtil.saveIsTracking(ctx, false)
         serviceConnection.service?.stopTracking()
-        FlutterBackgroundManager.cleanup()
+        FlutterBackgroundManager.forceCleanup()
         result.success(true)
     }
 
@@ -132,6 +146,12 @@ internal class MethodCallHelper(private val ctx: Context) : MethodChannel.Method
     }
 
     override fun onLocationUpdate(location: Location) = FlutterBackgroundManager.sendLocation(ctx, location)
+
+    fun cleanup() {
+        Logger.debug(TAG, "Cleaning up MethodCallHelper")
+        serviceConnection.onStop(ctx)
+        serviceConnection = LocationServiceConnection(this)
+    }
 
     companion object {
         private val TAG = MethodCallHelper::class.java.simpleName
