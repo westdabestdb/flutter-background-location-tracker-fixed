@@ -18,20 +18,16 @@ class ForegroundChannel {
 
   static Future<void> initialize(Function callbackDispatcher,
       {required BackgroundLocationTrackerConfig config}) async {
-    print('🚨 FLUTTER: ForegroundChannel.initialize called');
     final callback = PluginUtilities.getCallbackHandle(callbackDispatcher);
     if (callback == null) {
-      print('🚨 FLUTTER: ERROR - callback is null');
       throw ArgumentError(
           'The callbackDispatcher needs to be either a static function or a top level function to be accessible as a Flutter entry point.');
     }
     final handle = callback.toRawHandle();
-    print('🚨 FLUTTER: Callback handle: $handle');
     
     // Set up method call handler for permission change events
     _foregroundChannel.setMethodCallHandler(_handleMethodCall);
     
-    print('🚨 FLUTTER: Calling native initialize method with handle: $handle');
     await _foregroundChannel.invokeMethod<void>(
       'initialize',
       {
@@ -56,7 +52,6 @@ class ForegroundChannel {
         'ios_restart_after_kill': config.iOSConfig.restartAfterKill,
       },
     );
-    print('🚨 FLUTTER: Native initialize method call completed');
   }
 
   static Future<bool> isTracking() async {
