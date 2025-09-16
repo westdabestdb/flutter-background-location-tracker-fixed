@@ -18,12 +18,14 @@ import io.flutter.plugin.common.MethodChannel
 internal class MethodCallHelper(private val ctx: Context) : MethodChannel.MethodCallHandler, LifecycleObserver, LocationUpdateListener {
 
     private var serviceConnection = LocationServiceConnection(this)
+    private var isDriveActive = false
 
     fun handle(call: MethodCall, result: MethodChannel.Result) = when (call.method) {
         "initialize" -> initialize(ctx, call, result)
         "isTracking" -> isTracking(ctx, call, result)
         "startTracking" -> startTracking(ctx, call, result)
         "stopTracking" -> stopTracking(ctx, call, result)
+        "setDriveActive" -> setDriveActive(ctx, call, result)
         else -> result.error("404", "${call.method} is not supported", null)
     }
 
@@ -133,6 +135,20 @@ internal class MethodCallHelper(private val ctx: Context) : MethodChannel.Method
     @OnLifecycleEvent(Lifecycle.Event.ON_RESUME)
     fun onResume() {
         serviceConnection.onResume(ctx)
+        
+        // Re-check permissions when app resumes (user might have granted permission in settings)
+        if (isDriveActive) {
+            Logger.debug(TAG, "App resumed, re-checking location permission")
+            val hasLocationPermission = hasLocationPermission()
+            Logger.debug(TAG, "Permission status on resume: $hasLocationPermission")
+            
+            if (hasLocationPermission) {
+                handlePermissionGranted()
+            }
+            
+            // Also ask the service to re-check permissions
+            serviceConnection.service?.recheckPermissions()
+        }
     }
 
     @OnLifecycleEvent(Lifecycle.Event.ON_PAUSE)
@@ -146,6 +162,78 @@ internal class MethodCallHelper(private val ctx: Context) : MethodChannel.Method
     }
 
     override fun onLocationUpdate(location: Location) = FlutterBackgroundManager.sendLocation(ctx, location)
+
+    private fun setDriveActive(ctx: Context, call: MethodCall, result: MethodChannel.Result) {
+        val isActive = call.argument<Boolean>("isActive") ?: false
+        Logger.debug(TAG, "Setting drive active state to: $isActive")
+        
+        isDriveActive = isActive
+        
+        // Save the drive active state
+        SharedPrefsUtil.saveDriveActive(ctx, isActive)
+        
+        // Notify the service about the drive active state change
+        serviceConnection.service?.setDriveActive(isActive)
+        
+        if (isActive) {
+            // Start monitoring location permission changes
+            startPermissionMonitoring()
+        } else {
+            // Stop monitoring permission changes
+            stopPermissionMonitoring()
+        }
+        
+        result.success(true)
+    }
+    
+    private fun startPermissionMonitoring() {
+        Logger.debug(TAG, "Starting location permission monitoring")
+        
+        // Check current permission status
+        val hasLocationPermission = hasLocationPermission()
+        Logger.debug(TAG, "Current location permission status: $hasLocationPermission")
+        
+        // If already granted, start tracking immediately
+        if (hasLocationPermission) {
+            handlePermissionGranted()
+        }
+        
+        // Note: For Android, we'll check permission status when the service tries to start
+        // The service will handle the permission check and call handlePermissionGranted if needed
+    }
+    
+    private fun stopPermissionMonitoring() {
+        Logger.debug(TAG, "Stopping location permission monitoring")
+        // Permission monitoring is handled by the service, no specific cleanup needed
+    }
+    
+    private fun hasLocationPermission(): Boolean {
+        return android.content.pm.PackageManager.PERMISSION_GRANTED == 
+            ctx.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) ||
+            android.content.pm.PackageManager.PERMISSION_GRANTED == 
+            ctx.checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION)
+    }
+    
+    private fun handlePermissionGranted() {
+        if (!isDriveActive) {
+            Logger.debug(TAG, "Permission granted but drive is not active, skipping auto-start")
+            return
+        }
+        
+        Logger.debug(TAG, "Location permission granted and drive is active, starting tracking")
+        
+        // Ensure background manager is ready before starting tracking
+        FlutterBackgroundManager.ensureInitialized(ctx)
+        
+        // Start tracking automatically
+        startTracking(ctx, MethodCall("startTracking", null)) { result ->
+            if (result is Boolean && result) {
+                Logger.debug(TAG, "Auto-started background location tracking")
+            } else {
+                Logger.debug(TAG, "Failed to auto-start tracking")
+            }
+        }
+    }
 
     fun cleanup() {
         Logger.debug(TAG, "Cleaning up MethodCallHelper")

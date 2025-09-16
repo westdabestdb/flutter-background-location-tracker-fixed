@@ -78,6 +78,16 @@ internal class LocationUpdatesService : Service() {
             Logger.debug(TAG, "Tracking is enabled, starting immediately")
             startTracking()
         }
+        
+        // Check if drive is active and we should start tracking due to permission change
+        if (isDriveActive() && hasLocationPermission() && !SharedPrefsUtil.isTracking(this)) {
+            Logger.debug(TAG, "Drive is active and permission granted, starting tracking")
+            
+            // Ensure background manager is ready before starting tracking
+            FlutterBackgroundManager.ensureInitialized(this)
+            
+            startTracking()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -211,6 +221,62 @@ internal class LocationUpdatesService : Service() {
             }
             SharedPrefsUtil.saveIsTracking(this, false)
             Logger.error(TAG, "Lost location permission. Could not request updates. $unlikely")
+            
+            // Check if drive is active and permission was lost - this might be a temporary issue
+            if (isDriveActive()) {
+                Logger.debug(TAG, "Drive is active but permission lost, will retry when permission is granted")
+            }
+        }
+    }
+    
+    /**
+     * Checks if drive is currently active
+     */
+    private fun isDriveActive(): Boolean {
+        return SharedPrefsUtil.isDriveActive(this)
+    }
+    
+    /**
+     * Sets the drive active state
+     */
+    fun setDriveActive(isActive: Boolean) {
+        SharedPrefsUtil.saveDriveActive(this, isActive)
+        Logger.debug(TAG, "Drive active state set to: $isActive")
+        
+        if (isActive) {
+            // Check if we have permission and can start tracking
+            if (hasLocationPermission()) {
+                Logger.debug(TAG, "Drive active and permission granted, starting tracking")
+                startTracking()
+            } else {
+                Logger.debug(TAG, "Drive active but no permission, waiting for permission")
+            }
+        }
+    }
+    
+    /**
+     * Checks if location permission is granted
+     */
+    private fun hasLocationPermission(): Boolean {
+        return checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == 
+            android.content.pm.PackageManager.PERMISSION_GRANTED ||
+            checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) == 
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+    
+    /**
+     * Re-checks permissions when app becomes active
+     */
+    fun recheckPermissions() {
+        Logger.debug(TAG, "Re-checking permissions due to app lifecycle change")
+        
+        if (isDriveActive() && hasLocationPermission() && !SharedPrefsUtil.isTracking(this)) {
+            Logger.debug(TAG, "Drive is active, permission granted, and not tracking - starting tracking")
+            
+            // Ensure background manager is ready before starting tracking
+            FlutterBackgroundManager.ensureInitialized(this)
+            
+            startTracking()
         }
     }
 

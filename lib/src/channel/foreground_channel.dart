@@ -3,6 +3,7 @@ import 'dart:ui';
 import 'package:background_location_tracker/src/model/config/android_config.dart';
 import 'package:background_location_tracker/src/model/config/background_location_tracker_config.dart';
 import 'package:background_location_tracker/src/model/config/ios_config.dart';
+import 'package:background_location_tracker/src/util/logger.dart';
 import 'package:flutter/services.dart';
 
 class ForegroundChannel {
@@ -11,15 +12,26 @@ class ForegroundChannel {
 
   static const MethodChannel _foregroundChannel =
       MethodChannel(_FOREGROUND_CHANNEL_NAME);
+  
+  // Callback for handling permission changes from native side
+  static Function()? _onPermissionGrantedCallback;
 
   static Future<void> initialize(Function callbackDispatcher,
       {required BackgroundLocationTrackerConfig config}) async {
+    print('🚨 FLUTTER: ForegroundChannel.initialize called');
     final callback = PluginUtilities.getCallbackHandle(callbackDispatcher);
     if (callback == null) {
+      print('🚨 FLUTTER: ERROR - callback is null');
       throw ArgumentError(
           'The callbackDispatcher needs to be either a static function or a top level function to be accessible as a Flutter entry point.');
     }
     final handle = callback.toRawHandle();
+    print('🚨 FLUTTER: Callback handle: $handle');
+    
+    // Set up method call handler for permission change events
+    _foregroundChannel.setMethodCallHandler(_handleMethodCall);
+    
+    print('🚨 FLUTTER: Calling native initialize method with handle: $handle');
     await _foregroundChannel.invokeMethod<void>(
       'initialize',
       {
@@ -44,6 +56,7 @@ class ForegroundChannel {
         'ios_restart_after_kill': config.iOSConfig.restartAfterKill,
       },
     );
+    print('🚨 FLUTTER: Native initialize method call completed');
   }
 
   static Future<bool> isTracking() async {
@@ -69,6 +82,34 @@ class ForegroundChannel {
 
   static Future<void> stopTracking() =>
       _foregroundChannel.invokeMethod('stopTracking');
+
+  static Future<void> setDriveActive(bool isActive) =>
+      _foregroundChannel.invokeMethod('setDriveActive', {'isActive': isActive});
+
+  /// Sets a callback to be called when location permission is granted
+  static void setOnPermissionGrantedCallback(Function() callback) {
+    _onPermissionGrantedCallback = callback;
+  }
+
+  /// Handles method calls from the native side
+  static Future<dynamic> _handleMethodCall(MethodCall call) async {
+    BackgroundLocationTrackerLogger.log('Received method call: ${call.method}');
+    
+    switch (call.method) {
+      case 'onPermissionGranted':
+        BackgroundLocationTrackerLogger.log('🚨 Location permission granted - triggering callback');
+        BackgroundLocationTrackerLogger.log('🚨 Callback is null: ${_onPermissionGrantedCallback == null}');
+        _onPermissionGrantedCallback?.call();
+        BackgroundLocationTrackerLogger.log('🚨 Callback executed');
+        return true;
+      default:
+        BackgroundLocationTrackerLogger.log('Unknown method call: ${call.method}');
+        throw PlatformException(
+          code: 'UNIMPLEMENTED',
+          message: 'ForegroundChannel does not recognize method ${call.method}',
+        );
+    }
+  }
 }
 
 String _activityTypeString(ActivityType activityType) {

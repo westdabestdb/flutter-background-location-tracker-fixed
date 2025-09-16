@@ -16,6 +16,7 @@ internal object SharedPrefsUtil {
     private const val KEY_NOTIFICATION_LOCATION_UPDATES_ENABLED = "background.location.tracker.manager.ENABLE_NOTIFICATION_LOCATION_UPDATES"
     private const val KEY_CANCEL_TRACKING_ACTION_TEXT = "background.location.tracker.manager.ENABLE_CANCEL_TRACKING_TEXT"
     private const val KEY_CANCEL_TRACKING_ACTION_ENABLED = "background.location.tracker.manager.ENABLE_CANCEL_TRACKING_ACTION"
+    private const val KEY_DRIVE_ACTIVE = "background.location.tracker.manager.DRIVE_ACTIVE"
 
     private fun Context.prefs() = getSharedPreferences(SHARED_PREFS_FILE_NAME, Context.MODE_PRIVATE)
 
@@ -87,4 +88,13 @@ internal object SharedPrefsUtil {
     fun isNotificationLocationUpdatesEnabled(ctx: Context): Boolean = ctx.prefs().getBoolean(KEY_NOTIFICATION_LOCATION_UPDATES_ENABLED, false)
 
     fun isCancelTrackingActionEnabled(ctx: Context): Boolean = ctx.prefs().getBoolean(KEY_CANCEL_TRACKING_ACTION_ENABLED, false)
+    
+    fun saveDriveActive(ctx: Context, isActive: Boolean) {
+        ctx.prefs()
+                .edit()
+                .putBoolean(KEY_DRIVE_ACTIVE, isActive)
+                .apply()
+    }
+
+    fun isDriveActive(ctx: Context): Boolean = ctx.prefs().getBoolean(KEY_DRIVE_ACTIVE, false)
 }

@@ -29,11 +29,15 @@ class BackgroundChannel {
   static Future<bool> handleLocationUpdate(
       MethodCall call, LocationUpdateCallback callback,
       {bool enableLogging = false}) async {
+    BackgroundLocationTrackerLogger.log('🚨 BACKGROUND: Location update received from native side');
+    BackgroundLocationTrackerLogger.log('🚨 BACKGROUND: Call arguments: ${call.arguments}');
+    
     final data = call.arguments as Map<dynamic, dynamic>; // ignore: avoid_as
     final isLoggingEnabled =
         data['logging_enabled'] as bool; // ignore: avoid_as
     BackgroundLocationTrackerLogger.enableLogging = isLoggingEnabled;
-    BackgroundLocationTrackerLogger.log('locationUpdate: ${call.arguments}');
+    BackgroundLocationTrackerLogger.log('🚨 BACKGROUND: locationUpdate: ${call.arguments}');
+    
     final lat = data['lat'] as double; // ignore: avoid_as
     final lon = data['lon'] as double; // ignore: avoid_as
     final alt = data['alt'] as double; // ignore: avoid_as
@@ -46,6 +50,8 @@ class BackgroundChannel {
         data['course_accuracy'] as double; // ignore: avoid_as
     final speed = data['speed'] as double; // ignore: avoid_as
     final speedAccuracy = data['speed_accuracy'] as double; // ignore: avoid_as
+    
+    BackgroundLocationTrackerLogger.log('🚨 BACKGROUND: Calling user callback with location data');
     await callback(BackgroundLocationUpdateData(
         lat: lat,
         lon: lon,
@@ -56,6 +62,8 @@ class BackgroundChannel {
         courseAccuracy: courseAccuracy,
         speed: speed,
         speedAccuracy: speedAccuracy));
+    
+    BackgroundLocationTrackerLogger.log('🚨 BACKGROUND: User callback completed successfully');
     return true;
   }
 }

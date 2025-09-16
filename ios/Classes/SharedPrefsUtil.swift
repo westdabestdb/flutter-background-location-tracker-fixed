@@ -17,18 +17,26 @@ struct SharedPrefsUtil {
     private static let KEY_DISTANCE_FILTER = "background.location.tracker.manager.DISTANCE_FILTER"
     private static let KEY_ACTIVITY_TYPE = "background.location.tracker.manager.KEY_ACTIVITY_TYPE"
     
-    private static let userDefaults = UserDefaults(suiteName: "\(SwiftBackgroundLocationTrackerPlugin.identifier).userDefaults")!
+    private static let userDefaults = UserDefaults.standard
     
     static func saveCallBackDispatcherHandleKey(callBackHandle: Int64?) {
+        print("🚨 SharedPrefsUtil: Saving callback handle: \(callBackHandle ?? -1)")
         store(callBackHandle, key: SharedPrefsUtil.KEY_CALLBACK_HANDLER)
+        
+        // Verify it was saved
+        let savedHandle = getCallbackHandle()
+        print("🚨 SharedPrefsUtil: Verification - saved handle: \(savedHandle ?? -1)")
     }
     
     static func getCallbackHandle() -> Int64? {
-        return getValue(for: SharedPrefsUtil.KEY_CALLBACK_HANDLER)
+        let handle: Int64? = getValue(for: SharedPrefsUtil.KEY_CALLBACK_HANDLER)
+        print("🚨 SharedPrefsUtil: Retrieved callback handle: \(handle ?? -1)")
+        return handle
     }
     
     static func hasCallbackHandle() -> Bool {
-        return getValue(for: SharedPrefsUtil.KEY_CALLBACK_HANDLER) ?? false
+        let handle: Int64? = getValue(for: SharedPrefsUtil.KEY_CALLBACK_HANDLER)
+        return handle != nil
     }
     
     static func saveIsTracking(_ isTracking: Bool) {
@@ -77,6 +85,7 @@ struct SharedPrefsUtil {
     
     private static func store<T>(_ value: T, key: String) {
         userDefaults.setValue(value, forKey: key)
+        userDefaults.synchronize()
     }
     
     private static func getValue<T>(for key: String) -> T? {

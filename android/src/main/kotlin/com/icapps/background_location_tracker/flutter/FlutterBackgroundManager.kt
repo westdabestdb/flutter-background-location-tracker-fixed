@@ -190,4 +190,11 @@ internal object FlutterBackgroundManager {
         // Clean up the Flutter engine completely to prevent DartExecutor reuse issues
         BackgroundLocationTrackerPlugin.cleanupFlutterEngine()
     }
+    
+    fun ensureInitialized(ctx: Context) {
+        Logger.debug("BackgroundManager", "Ensuring background manager is initialized")
+        if (!isInitialized) {
+            setupBackgroundChannelIfNeeded(ctx)
+        }
+    }
 }

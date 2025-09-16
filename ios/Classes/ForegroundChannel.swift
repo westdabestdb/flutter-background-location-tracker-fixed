@@ -14,11 +14,13 @@ fileprivate enum ForegroundMethods: String {
     case isTracking = "isTracking"
     case startTracking = "startTracking"
     case stopTracking = "stopTracking"
+    case setDriveActive = "setDriveActive"
 }
 
 public class ForegroundChannel : NSObject {
     
     private var isTracking = false
+    private var isDriveActive = false
     private static let FOREGROUND_CHANNEL_NAME = "com.icapps.background_location_tracker/foreground_channel"
     
     private let locationManager = LocationManager.shared()
@@ -46,6 +48,8 @@ public class ForegroundChannel : NSObject {
             startTracking(result)
         case ForegroundMethods.stopTracking.rawValue:
             stopTracking(result)
+        case ForegroundMethods.setDriveActive.rawValue:
+            setDriveActive(call: call, result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -54,16 +58,20 @@ public class ForegroundChannel : NSObject {
     // MARK: - private methods
     
     private func initialize(call: FlutterMethodCall, result: @escaping FlutterResult ) {
+        print("🚨 FOREGROUND CHANNEL: Initialize method called")
         let callBackHandleKey = "callback_handle"
         let loggingEnabledKey = "logging_enabled"
         let activityTypeKey = "ios_activity_type"
         let distanceFilterKey = "ios_distance_filter"
         let restartAfterKillKey = "ios_restart_after_kill"
         let map = call.arguments as? [String: Any]
+        print("🚨 FOREGROUND CHANNEL: Arguments map: \(map ?? [:])")
         guard let callbackDispatcherHandle = map?[callBackHandleKey] else {
+            print("🚨 FOREGROUND CHANNEL: No callback handle found in arguments")
             result(false)
             return
         }
+        print("🚨 FOREGROUND CHANNEL: Callback handle found: \(callbackDispatcherHandle)")
         
         
         let loggingEnabled: Bool = map?[loggingEnabledKey] as? Bool ?? false
@@ -93,7 +101,14 @@ public class ForegroundChannel : NSObject {
         SharedPrefsUtil.saveActivityType(activityType)
         SharedPrefsUtil.saveDistanceFilter(map?[distanceFilterKey] as? Double ?? kCLDistanceFilterNone)
         
-        SharedPrefsUtil.saveCallBackDispatcherHandleKey(callBackHandle: callbackDispatcherHandle as? Int64)
+        let callbackHandle = callbackDispatcherHandle as? Int64
+        CustomLogger.logCritical(message: "🚨 INITIALIZE: Saving callback handle: \(callbackHandle ?? -1)")
+        SharedPrefsUtil.saveCallBackDispatcherHandleKey(callBackHandle: callbackHandle)
+        
+        // Verify the callback handle was saved
+        let savedHandle = SharedPrefsUtil.getCallbackHandle()
+        CustomLogger.logCritical(message: "🚨 INITIALIZE: Saved callback handle verification: \(savedHandle ?? -1)")
+        
         SharedPrefsUtil.saveIsTracking(isTracking)
         result(true)
     }
@@ -130,6 +145,16 @@ public class ForegroundChannel : NSObject {
         
         // CRITICAL: Set the plugin as the delegate AFTER reactivation and state setting
         SwiftBackgroundLocationTrackerPlugin.setLocationManagerDelegate()
+        
+        // CRITICAL: Ensure background channel is initialized before starting location services
+        // This is crucial for receiving location updates
+        if let flutterEngine = SwiftBackgroundLocationTrackerPlugin.getFlutterEngine() {
+            CustomLogger.log(message: "FlutterEngine available, initializing background channel")
+            SwiftBackgroundLocationTrackerPlugin.initBackgroundMethodChannel(flutterEngine: flutterEngine)
+        } else {
+            CustomLogger.logCritical(message: "🚨 WARNING: No FlutterEngine available for background channel initialization")
+            CustomLogger.logCritical(message: "Location updates will be cached but not sent to Flutter")
+        }
         
         // Start location services with restored settings
         locationManager.startUpdatingLocation()
@@ -207,5 +232,147 @@ public class ForegroundChannel : NSObject {
     private func isTracking(_ result: @escaping FlutterResult) {
         SharedPrefsUtil.saveIsTracking(isTracking)
         result(isTracking)
+    }
+    
+    private func setDriveActive(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let isActive = args["isActive"] as? Bool else {
+            result(FlutterError(code: "INVALID_ARGUMENTS", message: "isActive parameter is required", details: nil))
+            return
+        }
+        
+        CustomLogger.log(message: "Setting drive active state to: \(isActive)")
+        isDriveActive = isActive
+        
+        if isActive {
+            // Start monitoring location permission changes
+            startPermissionMonitoring()
+        } else {
+            // Stop monitoring permission changes
+            stopPermissionMonitoring()
+        }
+        
+        result(true)
+    }
+    
+    private func startPermissionMonitoring() {
+        CustomLogger.log(message: "Starting location permission monitoring")
+        
+        // Check current permission status
+        let currentStatus = CLLocationManager.authorizationStatus()
+        CustomLogger.log(message: "Current location permission status: \(currentStatus.rawValue)")
+        
+        // If already granted, notify Flutter immediately
+        if isLocationPermissionGranted(currentStatus) {
+            CustomLogger.log(message: "Permission already granted - notifying Flutter immediately")
+            handlePermissionGranted()
+        }
+        
+        // Set up location manager delegate to listen for permission changes
+        locationManager.delegate = self
+        
+        // Listen for app lifecycle changes to re-check permissions
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appDidBecomeActive),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+    }
+    
+    private func stopPermissionMonitoring() {
+        CustomLogger.log(message: "Stopping location permission monitoring")
+        // Remove app lifecycle observer
+        NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
+        // Note: We don't clear the delegate here as it might be used for other purposes
+        // The permission monitoring will be handled by checking isDriveActive in delegate methods
+    }
+    
+    @objc private func appDidBecomeActive() {
+        guard isDriveActive else { return }
+        
+        CustomLogger.log(message: "App became active, re-checking location permission")
+        
+        // Re-check permission status when app becomes active
+        let currentStatus = CLLocationManager.authorizationStatus()
+        CustomLogger.log(message: "Permission status on app active: \(currentStatus.rawValue)")
+        
+        if isLocationPermissionGranted(currentStatus) {
+            handlePermissionGranted()
+        }
+    }
+    
+    private func isLocationPermissionGranted(_ status: CLAuthorizationStatus) -> Bool {
+        return status == .authorizedWhenInUse || status == .authorizedAlways
+    }
+    
+    private func handlePermissionGranted() {
+        CustomLogger.logCritical(message: "🚨 handlePermissionGranted() called")
+        CustomLogger.logCritical(message: "🚨 isDriveActive: \(isDriveActive)")
+        
+        guard isDriveActive else {
+            CustomLogger.log(message: "Permission granted but drive is not active, skipping auto-start")
+            return
+        }
+        
+        CustomLogger.logCritical(message: "🚨 Location permission granted and drive is active")
+        
+        // Try to notify Flutter first
+        notifyFlutterPermissionGranted()
+        
+        // Also try to start tracking directly as a fallback
+        // This ensures tracking starts even if Flutter communication fails
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self else { return }
+            
+            CustomLogger.logCritical(message: "🚨 Fallback: Starting tracking directly after permission granted")
+            self.startTracking { result in
+                if let success = result as? Bool, success {
+                    CustomLogger.logCritical(message: "🚨 Fallback tracking started successfully")
+                } else {
+                    CustomLogger.logCritical(message: "🚨 Fallback tracking failed")
+                }
+            }
+        }
+    }
+    
+    private func notifyFlutterPermissionGranted() {
+        CustomLogger.logCritical(message: "🚨 notifyFlutterPermissionGranted() called")
+        
+        // Send a method call to Flutter to notify about permission granted
+        // This allows Flutter to handle the initialization properly
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { 
+                CustomLogger.logCritical(message: "🚨 self is nil in notifyFlutterPermissionGranted")
+                return 
+            }
+            
+            // We need to get the method channel to send the notification
+            // This should be available from the plugin registration
+            if let methodChannel = SwiftBackgroundLocationTrackerPlugin.getForegroundMethodChannel() {
+                CustomLogger.logCritical(message: "🚨 Method channel found, sending permission granted notification to Flutter")
+                methodChannel.invokeMethod("onPermissionGranted", arguments: nil) { result in
+                    if let error = result as? FlutterError {
+                        CustomLogger.logCritical(message: "🚨 Failed to notify Flutter about permission granted: \(error.message ?? "Unknown error")")
+                    } else {
+                        CustomLogger.logCritical(message: "🚨 Successfully notified Flutter about permission granted")
+                    }
+                }
+            } else {
+                CustomLogger.logCritical(message: "🚨 CRITICAL: No method channel available to notify Flutter about permission granted")
+                CustomLogger.logCritical(message: "This means the plugin was not properly initialized")
+            }
+        }
+    }
+}
+
+// MARK: - CLLocationManagerDelegate
+extension ForegroundChannel: CLLocationManagerDelegate {
+    public func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
+        CustomLogger.log(message: "Location permission status changed to: \(status.rawValue)")
+        
+        if isLocationPermissionGranted(status) {
+            handlePermissionGranted()
+        }
     }
 }

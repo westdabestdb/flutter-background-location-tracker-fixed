@@ -9,6 +9,7 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
     private static let flutterThreadLabelPrefix = "\(identifier).BackgroundLocationTracker"
     
     private static var foregroundChannel: ForegroundChannel? = nil
+    private static var foregroundMethodChannel: FlutterMethodChannel? = nil
     private static var backgroundMethodChannel: FlutterMethodChannel? = nil
     
     private static var flutterEngine: FlutterEngine? = nil
@@ -93,6 +94,11 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
     // Method to get the plugin instance
     public static func getPluginInstance() -> SwiftBackgroundLocationTrackerPlugin? {
         return pluginInstance
+    }
+    
+    // Method to get the foreground method channel for communication with Flutter
+    public static func getForegroundMethodChannel() -> FlutterMethodChannel? {
+        return foregroundMethodChannel
     }
     
     // Helper method to safely check if tracking should be restarted
@@ -210,8 +216,9 @@ extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
         let methodChannel = ForegroundChannel.createMethodChannel(binaryMessenger: registrar.messenger())
         let instance = SwiftBackgroundLocationTrackerPlugin()
         
-        // Store the plugin instance
+        // Store the plugin instance and method channel
         pluginInstance = instance
+        foregroundMethodChannel = methodChannel
         
         registrar.addMethodCallDelegate(instance, channel: methodChannel)
         registrar.addApplicationDelegate(instance)
@@ -237,13 +244,26 @@ extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
     
     public static func getFlutterEngine()-> FlutterEngine? {
         if flutterEngine == nil {
+            CustomLogger.log(message: "Creating new FlutterEngine for background processing")
             let flutterEngine = FlutterEngine(name: flutterThreadLabelPrefix, project: nil, allowHeadlessExecution: true)
             
-            guard let callbackHandle = SharedPrefsUtil.getCallbackHandle(),
-                  let flutterCallbackInformation = FlutterCallbackCache.lookupCallbackInformation(callbackHandle) else {
-                CustomLogger.log(message: "No flutter callback cache ...")
+            let callbackHandle = SharedPrefsUtil.getCallbackHandle()
+            CustomLogger.logCritical(message: "🚨 getFlutterEngine: Retrieved callback handle: \(callbackHandle ?? -1)")
+            
+            guard let callbackHandle = callbackHandle else {
+                CustomLogger.logCritical(message: "🚨 CRITICAL: No callback handle found in SharedPrefs - FlutterEngine cannot be created")
+                CustomLogger.logCritical(message: "This usually means the plugin was not properly initialized with a callback handle")
                 return nil
             }
+            
+            guard let flutterCallbackInformation = FlutterCallbackCache.lookupCallbackInformation(callbackHandle) else {
+                CustomLogger.logCritical(message: "🚨 CRITICAL: FlutterCallbackCache lookup failed for handle: \(callbackHandle)")
+                CustomLogger.logCritical(message: "This usually means the Flutter app was not properly built with the callback registered")
+                return nil
+            }
+            
+            CustomLogger.log(message: "Found callback information: \(flutterCallbackInformation.callbackName) in \(flutterCallbackInformation.callbackLibraryPath)")
+            
             let success = flutterEngine.run(withEntrypoint: flutterCallbackInformation.callbackName, libraryURI: flutterCallbackInformation.callbackLibraryPath)
             
             CustomLogger.log(message: "FlutterEngine.run returned `\(success)`")
@@ -259,7 +279,10 @@ extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
                 initBackgroundMethodChannel(flutterEngine: flutterEngine)
                 CustomLogger.log(message: "Background method channel initialized immediately after engine creation")
             } else {
-                CustomLogger.log(message: "FlutterEngine.run returned `false` we will cleanup the flutterEngine")
+                CustomLogger.logCritical(message: "🚨 CRITICAL: FlutterEngine.run returned `false` - engine failed to start")
+                CustomLogger.logCritical(message: "This usually indicates a problem with the Flutter entrypoint or library path")
+                CustomLogger.logCritical(message: "Entrypoint: \(flutterCallbackInformation.callbackName)")
+                CustomLogger.logCritical(message: "Library path: \(flutterCallbackInformation.callbackLibraryPath)")
                 flutterEngine.destroyContext()
             }
         }
@@ -290,12 +313,16 @@ extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
     }
     
     public static func sendLocationupdate(locationData: [String: Any]){
+        CustomLogger.logCritical(message: "🚨 sendLocationupdate called with data: \(locationData)")
+        
         guard let backgroundMethodChannel = SwiftBackgroundLocationTrackerPlugin.backgroundMethodChannel else {
-            CustomLogger.log(message: "No background channel available ...")
+            CustomLogger.logCritical(message: "🚨 No background channel available for sending location update")
             return
         }
+        
+        CustomLogger.logCritical(message: "🚨 Sending location update via background channel")
         backgroundMethodChannel.invokeMethod(BackgroundMethods.onLocationUpdate.rawValue, arguments: locationData, result: { flutterResult in
-            CustomLogger.log(message: "Received result: \(flutterResult.debugDescription)")
+            CustomLogger.logCritical(message: "🚨 Location update result: \(flutterResult.debugDescription)")
         })
     }
 }
@@ -435,22 +462,27 @@ extension SwiftBackgroundLocationTrackerPlugin: CLLocationManagerDelegate {
             locationData["course_accuracy"] = location.courseAccuracy
         }
         
+        CustomLogger.logCritical(message: "🚨 Location update received - checking callback status")
+        CustomLogger.logCritical(message: "🚨 initializedBackgroundCallbacks: \(SwiftBackgroundLocationTrackerPlugin.initializedBackgroundCallbacks)")
+        CustomLogger.logCritical(message: "🚨 initializedBackgroundCallbacksStarted: \(SwiftBackgroundLocationTrackerPlugin.initializedBackgroundCallbacksStarted)")
+        
         if SwiftBackgroundLocationTrackerPlugin.initializedBackgroundCallbacks {
-            CustomLogger.log(message: "INITIALIZED, ready to send location updates")
+            CustomLogger.logCritical(message: "🚨 INITIALIZED, ready to send location updates")
             SwiftBackgroundLocationTrackerPlugin.sendLocationupdate(locationData: locationData)
         } else {
-            CustomLogger.log(message: "NOT YET INITIALIZED. Cache the location data")
+            CustomLogger.logCritical(message: "🚨 NOT YET INITIALIZED. Cache the location data")
             SwiftBackgroundLocationTrackerPlugin.locationData = locationData
             
             if !SwiftBackgroundLocationTrackerPlugin.initializedBackgroundCallbacksStarted {
+                CustomLogger.logCritical(message: "🚨 Starting background callbacks initialization")
                 SwiftBackgroundLocationTrackerPlugin.initializedBackgroundCallbacksStarted = true
             
                 // Create the Flutter engine - the background method channel will be initialized automatically
                 guard let flutterEngine = SwiftBackgroundLocationTrackerPlugin.getFlutterEngine() else {
-                    CustomLogger.log(message: "No Flutter engine available ...")
+                    CustomLogger.logCritical(message: "🚨 No Flutter engine available for background callbacks")
                     return
                 }
-                CustomLogger.log(message: "Flutter engine created, background channel should be ready")
+                CustomLogger.logCritical(message: "🚨 Flutter engine created, background channel should be ready")
             }
         }
     }
