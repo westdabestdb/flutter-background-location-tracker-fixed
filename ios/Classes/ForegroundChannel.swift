@@ -14,7 +14,6 @@ fileprivate enum ForegroundMethods: String {
     case isTracking = "isTracking"
     case startTracking = "startTracking"
     case stopTracking = "stopTracking"
-    case setTrackingActive = "setTrackingActive"
 }
 
 public class ForegroundChannel : NSObject {
@@ -48,8 +47,6 @@ public class ForegroundChannel : NSObject {
             startTracking(result)
         case ForegroundMethods.stopTracking.rawValue:
             stopTracking(result)
-        case ForegroundMethods.setTrackingActive.rawValue:
-            setTrackingActive(call: call, result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -110,6 +107,26 @@ public class ForegroundChannel : NSObject {
         CustomLogger.logCritical(message: "🚨 INITIALIZE: Saved callback handle verification: \(savedHandle ?? -1)")
         
         SharedPrefsUtil.saveIsTracking(isTracking)
+        
+        // CRITICAL: Restore tracking active state from previous session
+        isTrackingActive = SharedPrefsUtil.isTrackingActive()
+        if isTrackingActive {
+            CustomLogger.log(message: "Restoring tracking active state from previous session")
+            startPermissionMonitoring()
+            
+            // If we were tracking before app termination, check if we should restart tracking
+            if SharedPrefsUtil.isTracking() {
+                CustomLogger.log(message: "App was tracking before termination, checking if we should restart")
+                let currentStatus = CLLocationManager.authorizationStatus()
+                if isLocationPermissionGranted(currentStatus) {
+                    CustomLogger.log(message: "Permission is granted, restarting tracking")
+                    handlePermissionGranted()
+                } else {
+                    CustomLogger.log(message: "Permission not granted, will wait for permission change")
+                }
+            }
+        }
+        
         result(true)
     }
     
@@ -139,6 +156,11 @@ public class ForegroundChannel : NSObject {
         // CRITICAL: Set tracking state BEFORE setting delegate
         isTracking = true
         SharedPrefsUtil.saveIsTracking(isTracking)
+        
+        // CRITICAL: Set tracking active state to enable permission monitoring
+        isTrackingActive = true
+        SharedPrefsUtil.saveTrackingActive(isTrackingActive)
+        startPermissionMonitoring()
         
         // CRITICAL: Force UserDefaults sync to ensure immediate persistence
         UserDefaults.standard.synchronize()
@@ -208,6 +230,12 @@ public class ForegroundChannel : NSObject {
         // CRITICAL: Clear tracking state AFTER stopping services and clearing delegate
         isTracking = false
         SharedPrefsUtil.saveIsTracking(isTracking)
+        
+        // CRITICAL: Clear tracking active state and stop permission monitoring
+        isTrackingActive = false
+        SharedPrefsUtil.saveTrackingActive(isTrackingActive)
+        stopPermissionMonitoring()
+        
         UserDefaults.standard.synchronize()
         
         CustomLogger.log(message: "Tracking state cleared and persisted")
@@ -234,26 +262,6 @@ public class ForegroundChannel : NSObject {
         result(isTracking)
     }
     
-    private func setTrackingActive(call: FlutterMethodCall, result: @escaping FlutterResult) {
-        guard let args = call.arguments as? [String: Any],
-              let isActive = args["isActive"] as? Bool else {
-            result(FlutterError(code: "INVALID_ARGUMENTS", message: "isActive parameter is required", details: nil))
-            return
-        }
-        
-        CustomLogger.log(message: "Setting tracking active state to: \(isActive)")
-        isTrackingActive = isActive
-        
-        if isActive {
-            // Start monitoring location permission changes
-            startPermissionMonitoring()
-        } else {
-            // Stop monitoring permission changes
-            stopPermissionMonitoring()
-        }
-        
-        result(true)
-    }
     
     private func startPermissionMonitoring() {
         CustomLogger.log(message: "Starting location permission monitoring")
@@ -317,19 +325,49 @@ public class ForegroundChannel : NSObject {
         
         CustomLogger.logCritical(message: "🚨 Location permission granted and tracking is active - starting tracking directly")
         
-        // Start tracking directly since setTrackingActive is true
-        // This eliminates the need for Flutter callback mechanism
+        // Check if we're already tracking to avoid duplicate calls
+        guard !isTracking else {
+            CustomLogger.log(message: "Already tracking, skipping duplicate start")
+            return
+        }
+        
+        // Start tracking directly by setting the state and starting location services
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             
             CustomLogger.logCritical(message: "🚨 Starting tracking directly after permission granted")
-            self.startTracking { result in
-                if let success = result as? Bool, success {
-                    CustomLogger.logCritical(message: "🚨 Tracking started successfully from native side")
-                } else {
-                    CustomLogger.logCritical(message: "🚨 Tracking failed to start from native side")
-                }
+            
+            // CRITICAL: Always reactivate after logout to ensure proper tracking
+            CustomLogger.log(message: "Forcing location manager reactivation for tracking")
+            LocationManager.reactivateForTracking()
+            CustomLogger.log(message: "After reactivation: \(LocationManager.getCurrentStatus())")
+            
+            // Set tracking state
+            self.isTracking = true
+            SharedPrefsUtil.saveIsTracking(self.isTracking)
+            
+            // Set the plugin as the delegate
+            SwiftBackgroundLocationTrackerPlugin.setLocationManagerDelegate()
+            
+            // CRITICAL: Ensure background channel is initialized before starting location services
+            // This is crucial for receiving location updates
+            if let flutterEngine = SwiftBackgroundLocationTrackerPlugin.getFlutterEngine() {
+                CustomLogger.log(message: "FlutterEngine available, initializing background channel")
+                SwiftBackgroundLocationTrackerPlugin.initBackgroundMethodChannel(flutterEngine: flutterEngine)
+            } else {
+                CustomLogger.logCritical(message: "🚨 WARNING: No FlutterEngine available for background channel initialization")
+                CustomLogger.logCritical(message: "Location updates will be cached but not sent to Flutter")
             }
+            
+            // Start location services with restored settings
+            self.locationManager.startUpdatingLocation()
+            self.locationManager.startMonitoringSignificantLocationChanges()
+            
+            CustomLogger.log(message: "Location tracking started with settings: accuracy=\(self.locationManager.desiredAccuracy), distanceFilter=\(self.locationManager.distanceFilter)")
+            CustomLogger.log(message: LocationManager.getCurrentStatus())
+            CustomLogger.log(message: "Status bar indicator should be visible: \(LocationManager.shouldShowStatusBarIndicator())")
+            
+            CustomLogger.logCritical(message: "🚨 Tracking started successfully from native side")
         }
     }
     

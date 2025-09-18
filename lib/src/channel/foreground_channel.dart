@@ -73,8 +73,6 @@ class ForegroundChannel {
   static Future<void> stopTracking() =>
       _foregroundChannel.invokeMethod('stopTracking');
 
-  static Future<void> setTrackingActive(bool isActive) =>
-      _foregroundChannel.invokeMethod('setTrackingActive', {'isActive': isActive});
 
 }
 

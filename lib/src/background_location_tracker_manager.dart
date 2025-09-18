@@ -26,10 +26,5 @@ class BackgroundLocationTrackerManager {
   static void handleBackgroundUpdated(LocationUpdateCallback callback) =>
       BackgroundChannel.handleBackgroundUpdated(callback);
 
-  /// Sets the tracking active state - native side will handle permission monitoring
-  static Future<void> setTrackingActive(bool isActive) async {
-    BackgroundLocationTrackerLogger.log('Setting tracking active state to: $isActive');
-    return ForegroundChannel.setTrackingActive(isActive);
-  }
 
 }

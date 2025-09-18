@@ -16,6 +16,7 @@ struct SharedPrefsUtil {
     private static let KEY_LOGGING_ENABLED = "background.location.tracker.manager.LOGGIN_ENABLED"
     private static let KEY_DISTANCE_FILTER = "background.location.tracker.manager.DISTANCE_FILTER"
     private static let KEY_ACTIVITY_TYPE = "background.location.tracker.manager.KEY_ACTIVITY_TYPE"
+    private static let KEY_TRACKING_ACTIVE = "background.location.tracker.manager.TRACKING_ACTIVE"
     
     private static let userDefaults = UserDefaults.standard
     
@@ -79,6 +80,14 @@ struct SharedPrefsUtil {
         guard let rawValue: Int = getValue(for: SharedPrefsUtil.KEY_ACTIVITY_TYPE) else { return CLActivityType.other }
         
         return CLActivityType.init(rawValue: rawValue) ?? CLActivityType.other
+    }
+    
+    static func saveTrackingActive(_ isTrackingActive: Bool) {
+        store(isTrackingActive, key: SharedPrefsUtil.KEY_TRACKING_ACTIVE)
+    }
+    
+    static func isTrackingActive() -> Bool {
+        return getValue(for: SharedPrefsUtil.KEY_TRACKING_ACTIVE) ?? false
     }
     
     // MARK: - Helper methods

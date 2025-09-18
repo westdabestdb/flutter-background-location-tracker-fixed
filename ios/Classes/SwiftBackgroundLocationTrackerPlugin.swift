@@ -137,6 +137,13 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
             return
         }
         
+        // CRITICAL: Restore tracking active state for permission monitoring
+        let isTrackingActive = SharedPrefsUtil.isTrackingActive()
+        if isTrackingActive {
+            CustomLogger.log(message: "Restoring tracking active state for permission monitoring")
+            // The ForegroundChannel will handle this when it's initialized
+        }
+        
         // Perform health check to identify issues
         let healthCheck = LocationManager.performHealthCheck()
         CustomLogger.log(message: "Health check result: isHealthy=\(healthCheck.isHealthy)")

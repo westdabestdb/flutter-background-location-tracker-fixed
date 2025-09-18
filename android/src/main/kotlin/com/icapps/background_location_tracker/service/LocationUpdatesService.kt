@@ -196,6 +196,9 @@ internal class LocationUpdatesService : Service() {
         Logger.debug(TAG, "Requesting location updates")
         SharedPrefsUtil.saveIsTracking(this, true)
         
+        // Set tracking active state to enable permission monitoring
+        SharedPrefsUtil.saveTrackingActive(this, true)
+        
         // Ensure we're running as foreground service if needed
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try {
@@ -293,6 +296,9 @@ internal class LocationUpdatesService : Service() {
         try {
             fusedLocationClient?.removeLocationUpdates(locationCallback)
             SharedPrefsUtil.saveIsTracking(this, false)
+            
+            // Clear tracking active state
+            SharedPrefsUtil.saveTrackingActive(this, false)
             stopSelf()
         } catch (unlikely: SecurityException) {
             SharedPrefsUtil.saveIsTracking(this, true)

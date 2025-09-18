@@ -25,7 +25,6 @@ internal class MethodCallHelper(private val ctx: Context) : MethodChannel.Method
         "isTracking" -> isTracking(ctx, call, result)
         "startTracking" -> startTracking(ctx, call, result)
         "stopTracking" -> stopTracking(ctx, call, result)
-        "setTrackingActive" -> setTrackingActive(ctx, call, result)
         else -> result.error("404", "${call.method} is not supported", null)
     }
 
@@ -68,6 +67,24 @@ internal class MethodCallHelper(private val ctx: Context) : MethodChannel.Method
         NotificationUtil.createNotificationChannels(ctx, channelName)
         SharedPrefsUtil.saveCallbackDispatcherHandleKey(ctx, callbackHandle)
         SharedPrefsUtil.saveNotificationConfig(ctx, notificationBody, notificationIcon, cancelTrackingActionText, enableNotificationLocationUpdates, enableCancelTrackingAction)
+        
+        // CRITICAL: Restore tracking active state from previous session
+        isTrackingActive = SharedPrefsUtil.isTrackingActive(ctx)
+        if (isTrackingActive) {
+            Logger.debug(TAG, "Restoring tracking active state from previous session")
+            startPermissionMonitoring()
+            
+            // If we were tracking before app termination, check if we should restart tracking
+            if (SharedPrefsUtil.isTracking(ctx)) {
+                Logger.debug(TAG, "App was tracking before termination, checking if we should restart")
+                if (hasLocationPermission()) {
+                    Logger.debug(TAG, "Permission is granted, restarting tracking")
+                    handlePermissionGranted()
+                } else {
+                    Logger.debug(TAG, "Permission not granted, will wait for permission change")
+                }
+            }
+        }
         result.success(true)
     }
 
@@ -105,6 +122,10 @@ internal class MethodCallHelper(private val ctx: Context) : MethodChannel.Method
         // Persist tracking intent BEFORE starting the service so a freshly created
         // service (after logout -> stopSelf) will auto-start in onCreate()
         SharedPrefsUtil.saveIsTracking(ctx, true)
+        
+        // Set tracking active state to enable permission monitoring
+        isTrackingActive = true
+        SharedPrefsUtil.saveTrackingActive(ctx, true)
 
         // Start the service immediately to avoid timing issues
         com.icapps.background_location_tracker.service.LocationUpdatesService.startServiceImmediately(ctx)
@@ -120,6 +141,10 @@ internal class MethodCallHelper(private val ctx: Context) : MethodChannel.Method
     private fun stopTracking(ctx: Context, call: MethodCall, result: MethodChannel.Result) {
         // Persist stop intent immediately in case the service isn't currently bound/running
         SharedPrefsUtil.saveIsTracking(ctx, false)
+        
+        // Clear tracking active state
+        isTrackingActive = false
+        SharedPrefsUtil.saveTrackingActive(ctx, false)
         serviceConnection.service?.stopTracking()
         FlutterBackgroundManager.forceCleanup()
         result.success(true)
@@ -163,28 +188,6 @@ internal class MethodCallHelper(private val ctx: Context) : MethodChannel.Method
 
     override fun onLocationUpdate(location: Location) = FlutterBackgroundManager.sendLocation(ctx, location)
 
-    private fun setTrackingActive(ctx: Context, call: MethodCall, result: MethodChannel.Result) {
-        val isActive = call.argument<Boolean>("isActive") ?: false
-        Logger.debug(TAG, "Setting tracking active state to: $isActive")
-        
-        isTrackingActive = isActive
-        
-        // Save the tracking active state
-        SharedPrefsUtil.saveTrackingActive(ctx, isActive)
-        
-        // Notify the service about the tracking active state change
-        serviceConnection.service?.setTrackingActive(isActive)
-        
-        if (isActive) {
-            // Start monitoring location permission changes
-            startPermissionMonitoring()
-        } else {
-            // Stop monitoring permission changes
-            stopPermissionMonitoring()
-        }
-        
-        result.success(true)
-    }
     
     private fun startPermissionMonitoring() {
         Logger.debug(TAG, "Starting location permission monitoring")
@@ -222,17 +225,29 @@ internal class MethodCallHelper(private val ctx: Context) : MethodChannel.Method
         
         Logger.debug(TAG, "Location permission granted and tracking is active, starting tracking")
         
+        // Check if we're already tracking to avoid duplicate calls
+        if (SharedPrefsUtil.isTracking(ctx)) {
+            Logger.debug(TAG, "Already tracking, skipping duplicate start")
+            return
+        }
+        
         // Ensure background manager is ready before starting tracking
         FlutterBackgroundManager.ensureInitialized(ctx)
         
-        // Start tracking automatically
-        startTracking(ctx, MethodCall("startTracking", null)) { result ->
-            if (result is Boolean && result) {
-                Logger.debug(TAG, "Auto-started background location tracking")
-            } else {
-                Logger.debug(TAG, "Failed to auto-start tracking")
-            }
-        }
+        // Start tracking by setting the state and starting the service
+        SharedPrefsUtil.saveIsTracking(ctx, true)
+        SharedPrefsUtil.saveTrackingActive(ctx, true)
+        
+        // Start the service immediately
+        com.icapps.background_location_tracker.service.LocationUpdatesService.startServiceImmediately(ctx)
+        
+        // Ensure service connection is established and start tracking
+        serviceConnection.bound(ctx)
+        
+        // Try to start tracking through service connection
+        serviceConnection.service?.startTracking()
+        
+        Logger.debug(TAG, "Auto-started background location tracking")
     }
 
     fun cleanup() {
