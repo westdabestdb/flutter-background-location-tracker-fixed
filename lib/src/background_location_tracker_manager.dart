@@ -26,15 +26,10 @@ class BackgroundLocationTrackerManager {
   static void handleBackgroundUpdated(LocationUpdateCallback callback) =>
       BackgroundChannel.handleBackgroundUpdated(callback);
 
-  /// Sets the drive active state - native side will handle permission monitoring
-  static Future<void> setDriveActive(bool isActive) async {
-    BackgroundLocationTrackerLogger.log('Setting drive active state to: $isActive');
-    return ForegroundChannel.setDriveActive(isActive);
+  /// Sets the tracking active state - native side will handle permission monitoring
+  static Future<void> setTrackingActive(bool isActive) async {
+    BackgroundLocationTrackerLogger.log('Setting tracking active state to: $isActive');
+    return ForegroundChannel.setTrackingActive(isActive);
   }
 
-  /// Sets a callback to be called when location permission is granted
-  /// This allows the Flutter side to handle permission changes and initialize tracking
-  static void setOnPermissionGrantedCallback(Function() callback) {
-    ForegroundChannel.setOnPermissionGrantedCallback(callback);
-  }
 }

@@ -79,9 +79,9 @@ internal class LocationUpdatesService : Service() {
             startTracking()
         }
         
-        // Check if drive is active and we should start tracking due to permission change
-        if (isDriveActive() && hasLocationPermission() && !SharedPrefsUtil.isTracking(this)) {
-            Logger.debug(TAG, "Drive is active and permission granted, starting tracking")
+        // Check if tracking is active and we should start tracking due to permission change
+        if (isTrackingActive() && hasLocationPermission() && !SharedPrefsUtil.isTracking(this)) {
+            Logger.debug(TAG, "Tracking is active and permission granted, starting tracking")
             
             // Ensure background manager is ready before starting tracking
             FlutterBackgroundManager.ensureInitialized(this)
@@ -222,34 +222,34 @@ internal class LocationUpdatesService : Service() {
             SharedPrefsUtil.saveIsTracking(this, false)
             Logger.error(TAG, "Lost location permission. Could not request updates. $unlikely")
             
-            // Check if drive is active and permission was lost - this might be a temporary issue
-            if (isDriveActive()) {
-                Logger.debug(TAG, "Drive is active but permission lost, will retry when permission is granted")
+            // Check if tracking is active and permission was lost - this might be a temporary issue
+            if (isTrackingActive()) {
+                Logger.debug(TAG, "Tracking is active but permission lost, will retry when permission is granted")
             }
         }
     }
     
     /**
-     * Checks if drive is currently active
+     * Checks if tracking is currently active
      */
-    private fun isDriveActive(): Boolean {
-        return SharedPrefsUtil.isDriveActive(this)
+    private fun isTrackingActive(): Boolean {
+        return SharedPrefsUtil.isTrackingActive(this)
     }
     
     /**
-     * Sets the drive active state
+     * Sets the tracking active state
      */
-    fun setDriveActive(isActive: Boolean) {
-        SharedPrefsUtil.saveDriveActive(this, isActive)
-        Logger.debug(TAG, "Drive active state set to: $isActive")
+    fun setTrackingActive(isActive: Boolean) {
+        SharedPrefsUtil.saveTrackingActive(this, isActive)
+        Logger.debug(TAG, "Tracking active state set to: $isActive")
         
         if (isActive) {
             // Check if we have permission and can start tracking
             if (hasLocationPermission()) {
-                Logger.debug(TAG, "Drive active and permission granted, starting tracking")
+                Logger.debug(TAG, "Tracking active and permission granted, starting tracking")
                 startTracking()
             } else {
-                Logger.debug(TAG, "Drive active but no permission, waiting for permission")
+                Logger.debug(TAG, "Tracking active but no permission, waiting for permission")
             }
         }
     }
@@ -270,8 +270,8 @@ internal class LocationUpdatesService : Service() {
     fun recheckPermissions() {
         Logger.debug(TAG, "Re-checking permissions due to app lifecycle change")
         
-        if (isDriveActive() && hasLocationPermission() && !SharedPrefsUtil.isTracking(this)) {
-            Logger.debug(TAG, "Drive is active, permission granted, and not tracking - starting tracking")
+        if (isTrackingActive() && hasLocationPermission() && !SharedPrefsUtil.isTracking(this)) {
+            Logger.debug(TAG, "Tracking is active, permission granted, and not tracking - starting tracking")
             
             // Ensure background manager is ready before starting tracking
             FlutterBackgroundManager.ensureInitialized(this)
