@@ -155,19 +155,17 @@ internal object FlutterBackgroundManager {
             data["speed_accuracy"] = if (location.hasSpeedAccuracy()) location.speedAccuracyMetersPerSecond else -1.0
         }
 
-        channel.invokeMethod("onLocationUpdate", data, object : MethodChannel.Result {
-            override fun success(result: Any?) {
-                Logger.debug("BackgroundManager", "Successfully sent location update")
-            }
-
-            override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
-                Logger.debug("BackgroundManager", "Error sending location update: $errorCode - $errorMessage : $errorDetails")
-            }
-
-            override fun notImplemented() {
-                Logger.debug("BackgroundManager", "Method not implemented for location update")
-            }
-        })
+        // Log the data being sent for debugging
+        Logger.debug("BackgroundManager", "Sending location update with data: $data")
+        
+        try {
+            // Use a simpler approach that should be compatible with Flutter 3.33.0
+            channel.invokeMethod("onLocationUpdate", data)
+            Logger.debug("BackgroundManager", "Successfully sent location update")
+        } catch (e: Exception) {
+            Logger.debug("BackgroundManager", "Exception in invokeMethod: ${e.message}")
+            Logger.debug("BackgroundManager", "Exception type: ${e.javaClass.simpleName}")
+        }
     }
     
     fun cleanup() {
