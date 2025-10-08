@@ -17,6 +17,10 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
     private static var initializedBackgroundCallbacks = false
     private static var initializedBackgroundCallbacksStarted = false
     private static var locationData: [String: Any]? = nil
+    // Small FIFO queue to buffer multiple locations before background isolate initialization
+    private static var pendingLocationQueue: [[String: Any]] = []
+    private static let pendingLocationQueueMaxSize = 10
+    private static var initTimeoutWorkItem: DispatchWorkItem? = nil
     
     // This will store the plugin that registered engines
     private static var pluginRegistrants: [(FlutterEngine) -> Void] = []
@@ -239,7 +243,7 @@ extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
         // Only start if we were tracking before AND restartAfterKill is enabled
         if shouldRestartTracking() {
             instance.locationManager.delegate = instance
-            instance.locationManager.startMonitoringSignificantLocationChanges()
+            // Prefer standard updates on restart for consistent data
             instance.locationManager.startUpdatingLocation()
         }
     }
@@ -303,11 +307,22 @@ extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
                 switch call.method {
                 case BackgroundMethods.initialized.rawValue:
                     initializedBackgroundCallbacks = true
+                    // Cancel initialization timeout when background isolate is ready
+                    SwiftBackgroundLocationTrackerPlugin.initTimeoutWorkItem?.cancel()
+                    SwiftBackgroundLocationTrackerPlugin.initTimeoutWorkItem = nil
                     if let data = SwiftBackgroundLocationTrackerPlugin.locationData {
                         CustomLogger.log(message: "Initialized with cached value, sending location update")
                         sendLocationupdate(locationData: data)
-                    } else {
-                        CustomLogger.log(message: "Initialized without cached value")
+                        SwiftBackgroundLocationTrackerPlugin.locationData = nil
+                    }
+                    // Flush queued locations
+                    if !SwiftBackgroundLocationTrackerPlugin.pendingLocationQueue.isEmpty {
+                        CustomLogger.log(message: "Flushing \(SwiftBackgroundLocationTrackerPlugin.pendingLocationQueue.count) queued location updates")
+                        let queued = SwiftBackgroundLocationTrackerPlugin.pendingLocationQueue
+                        SwiftBackgroundLocationTrackerPlugin.pendingLocationQueue.removeAll()
+                        for entry in queued {
+                            sendLocationupdate(locationData: entry)
+                        }
                     }
                     result(true)
                 default:
@@ -395,8 +410,8 @@ extension SwiftBackgroundLocationTrackerPlugin: CLLocationManagerDelegate {
                 
                 if let instance = SwiftBackgroundLocationTrackerPlugin.pluginInstance {
                     instance.locationManager.delegate = instance
+                    // Prefer standard updates when restoring after foreground re-entry for consistent data
                     instance.locationManager.startUpdatingLocation()
-                    instance.locationManager.startMonitoringSignificantLocationChanges()
                     CustomLogger.log(message: "Tracking restored after entering foreground")
                 }
             }
@@ -463,6 +478,10 @@ extension SwiftBackgroundLocationTrackerPlugin: CLLocationManagerDelegate {
             "speed": location.speed,
             "speed_accuracy": location.speedAccuracy,
             "logging_enabled": SharedPrefsUtil.isLoggingEnabled(),
+            // iOS Precise Location status reporting
+            "reduced_accuracy": {
+                if #available(iOS 14.0, *) { return manager.accuracyAuthorization == .reducedAccuracy } else { return false }
+            }()
         ]
         
         if #available(iOS 13.4, *) {
@@ -479,6 +498,11 @@ extension SwiftBackgroundLocationTrackerPlugin: CLLocationManagerDelegate {
         } else {
             CustomLogger.logCritical(message: "🚨 NOT YET INITIALIZED. Cache the location data")
             SwiftBackgroundLocationTrackerPlugin.locationData = locationData
+            // Also enqueue to avoid losing multiple updates
+            SwiftBackgroundLocationTrackerPlugin.pendingLocationQueue.append(locationData)
+            if SwiftBackgroundLocationTrackerPlugin.pendingLocationQueue.count > SwiftBackgroundLocationTrackerPlugin.pendingLocationQueueMaxSize {
+                SwiftBackgroundLocationTrackerPlugin.pendingLocationQueue.removeFirst()
+            }
             
             if !SwiftBackgroundLocationTrackerPlugin.initializedBackgroundCallbacksStarted {
                 CustomLogger.logCritical(message: "🚨 Starting background callbacks initialization")
@@ -490,7 +514,45 @@ extension SwiftBackgroundLocationTrackerPlugin: CLLocationManagerDelegate {
                     return
                 }
                 CustomLogger.logCritical(message: "🚨 Flutter engine created, background channel should be ready")
+                // Schedule a timeout to detect if background isolate never initializes
+                SwiftBackgroundLocationTrackerPlugin.initTimeoutWorkItem?.cancel()
+                let work = DispatchWorkItem { [weak flutterEngine] in
+                    if !SwiftBackgroundLocationTrackerPlugin.initializedBackgroundCallbacks {
+                        CustomLogger.logCritical(message: "🚨 Background isolate did not initialize within timeout. Queued updates: \(SwiftBackgroundLocationTrackerPlugin.pendingLocationQueue.count)")
+                        if flutterEngine == nil {
+                            CustomLogger.logCritical(message: "🚨 Flutter engine reference lost before initialization.")
+                        }
+                    }
+                }
+                SwiftBackgroundLocationTrackerPlugin.initTimeoutWorkItem = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: work)
             }
         }
+    }
+    
+    // Handle errors and pause/resume for better resilience
+    public func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        let nsError = error as NSError
+        CustomLogger.logCritical(message: "🚨 Location manager failed with error: \(nsError.domain)(\(nsError.code)) - \(nsError.localizedDescription)")
+        if (nsError.domain == kCLErrorDomain as String) {
+            switch CLError.Code(rawValue: nsError.code) {
+            case .denied:
+                CustomLogger.logCritical(message: "🚨 Location permission denied at runtime, forcing cleanup")
+                SharedPrefsUtil.saveIsTracking(false)
+                SwiftBackgroundLocationTrackerPlugin.forceCleanup()
+            case .locationUnknown:
+                CustomLogger.log(message: "Transient locationUnknown error; will keep tracking active")
+            default:
+                CustomLogger.log(message: "Unhandled CoreLocation error: \(nsError.code)")
+            }
+        }
+    }
+    
+    public func locationManagerDidPauseLocationUpdates(_ manager: CLLocationManager) {
+        CustomLogger.log(message: "Location updates paused by the system")
+    }
+    
+    public func locationManagerDidResumeLocationUpdates(_ manager: CLLocationManager) {
+        CustomLogger.log(message: "Location updates resumed by the system")
     }
 }

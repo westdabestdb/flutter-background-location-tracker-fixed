@@ -8,6 +8,7 @@
 import Foundation
 import CoreLocation
 import Flutter
+import UIKit
 
 fileprivate enum ForegroundMethods: String {
     case initialize = "initialize"
@@ -106,7 +107,8 @@ public class ForegroundChannel : NSObject {
         let savedHandle = SharedPrefsUtil.getCallbackHandle()
         CustomLogger.logCritical(message: "🚨 INITIALIZE: Saved callback handle verification: \(savedHandle ?? -1)")
         
-        SharedPrefsUtil.saveIsTracking(isTracking)
+        // Restore persisted tracking state in-memory but do not overwrite persistence here
+        isTracking = SharedPrefsUtil.isTracking()
         
         // CRITICAL: Restore tracking active state from previous session
         isTrackingActive = SharedPrefsUtil.isTrackingActive()
@@ -135,6 +137,19 @@ public class ForegroundChannel : NSObject {
         CustomLogger.logAlways(message: "Current location manager status: \(LocationManager.getCurrentStatus())")
         CustomLogger.logAlways(message: "Status bar indicator should be visible: \(LocationManager.shouldShowStatusBarIndicator())")
         CustomLogger.logAlways(message: "needsReactivation check: \(LocationManager.needsReactivation())")
+        // Diagnostics: ensure system location services and required background mode are enabled
+        guard CLLocationManager.locationServicesEnabled() else {
+            CustomLogger.logCritical(message: "🚨 System location services are disabled. Cannot start tracking.")
+            result(false)
+            return
+        }
+        
+        // If only WhenInUse is granted, attempt upgrade to Always for background reliability
+        let status = CLLocationManager.authorizationStatus()
+        if status == .authorizedWhenInUse {
+            CustomLogger.logCritical(message: "🚨 Only WhenInUse permission granted. Requesting Always authorization for background tracking.")
+            locationManager.requestAlwaysAuthorization()
+        }
         
         // CRITICAL: Check if this is a restoration attempt after app restart
         let isRestorationAttempt = SharedPrefsUtil.isTracking() && LocationManager.needsRestoration()
@@ -179,8 +194,8 @@ public class ForegroundChannel : NSObject {
         }
         
         // Start location services with restored settings
+        // Prefer standard updates for more consistent data
         locationManager.startUpdatingLocation()
-        locationManager.startMonitoringSignificantLocationChanges()
         
         // CRITICAL: Verify that tracking is properly configured
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -258,8 +273,8 @@ public class ForegroundChannel : NSObject {
     }
     
     private func isTracking(_ result: @escaping FlutterResult) {
-        SharedPrefsUtil.saveIsTracking(isTracking)
-        result(isTracking)
+        // Pure read: reflect persisted truth to avoid accidental flips
+        result(SharedPrefsUtil.isTracking())
     }
     
     
@@ -276,8 +291,10 @@ public class ForegroundChannel : NSObject {
             handlePermissionGranted()
         }
         
-        // Set up location manager delegate to listen for permission changes
-        locationManager.delegate = self
+        // Set up location manager delegate to listen for permission changes only when not actively tracking
+        if !isTracking {
+            locationManager.delegate = self
+        }
         
         // Listen for app lifecycle changes to re-check permissions
         NotificationCenter.default.addObserver(
@@ -292,8 +309,10 @@ public class ForegroundChannel : NSObject {
         CustomLogger.log(message: "Stopping location permission monitoring")
         // Remove app lifecycle observer
         NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
-        // Note: We don't clear the delegate here as it might be used for other purposes
-        // The permission monitoring will be handled by checking isTrackingActive in delegate methods
+        // Clear delegate only if we owned it
+        if let currentDelegate = locationManager.delegate as AnyObject?, currentDelegate === self {
+            locationManager.delegate = nil
+        }
     }
     
     @objc private func appDidBecomeActive() {
@@ -360,8 +379,8 @@ public class ForegroundChannel : NSObject {
             }
             
             // Start location services with restored settings
+            // Prefer standard updates for more consistent data
             self.locationManager.startUpdatingLocation()
-            self.locationManager.startMonitoringSignificantLocationChanges()
             
             CustomLogger.log(message: "Location tracking started with settings: accuracy=\(self.locationManager.desiredAccuracy), distanceFilter=\(self.locationManager.distanceFilter)")
             CustomLogger.log(message: LocationManager.getCurrentStatus())
@@ -375,11 +394,34 @@ public class ForegroundChannel : NSObject {
 
 // MARK: - CLLocationManagerDelegate
 extension ForegroundChannel: CLLocationManagerDelegate {
+    // iOS 14+
+    public func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        if #available(iOS 14.0, *) {
+            let status = manager.authorizationStatus
+            CustomLogger.log(message: "(iOS14+) Location permission status changed to: \(status.rawValue)")
+            if isLocationPermissionGranted(status) {
+                // Ensure tracking delegate is asserted when we are tracking
+                if SharedPrefsUtil.isTracking() {
+                    SwiftBackgroundLocationTrackerPlugin.setLocationManagerDelegate()
+                }
+                handlePermissionGranted()
+            }
+        }
+    }
     public func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
         CustomLogger.log(message: "Location permission status changed to: \(status.rawValue)")
         
         if isLocationPermissionGranted(status) {
+            // Ensure tracking delegate is asserted when we are tracking
+            if SharedPrefsUtil.isTracking() {
+                SwiftBackgroundLocationTrackerPlugin.setLocationManagerDelegate()
+            }
             handlePermissionGranted()
+        }
+        
+        // Diagnostics: if authorizedWhenInUse and tracking desired, suggest upgrade to Always
+        if status == .authorizedWhenInUse {
+            CustomLogger.logCritical(message: "🚨 Permission is WhenInUse; background updates may pause in background. Consider requesting Always.")
         }
     }
 }

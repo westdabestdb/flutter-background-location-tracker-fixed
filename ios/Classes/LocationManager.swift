@@ -231,12 +231,15 @@ class LocationManager {
     // Method to check if location services are actually running
     class func areLocationServicesRunning() -> Bool {
         let manager = sharedLocationManager
-        // Check if location services are in an active state
-        return manager.desiredAccuracy == kCLLocationAccuracyBest ||
-               manager.desiredAccuracy == kCLLocationAccuracyNearestTenMeters ||
-               manager.desiredAccuracy == kCLLocationAccuracyHundredMeters ||
-               manager.desiredAccuracy == kCLLocationAccuracyKilometer ||
-               manager.desiredAccuracy == kCLLocationAccuracyThreeKilometers
+        // Stricter definition of running: delegate set, background updates allowed, not at lowest accuracy, and distance filter not max
+        var isLowAccuracy = manager.desiredAccuracy == kCLLocationAccuracyThreeKilometers
+        if #available(iOS 14.0, *) {
+            isLowAccuracy = isLowAccuracy || manager.desiredAccuracy == kCLLocationAccuracyReduced
+        }
+        return manager.delegate != nil &&
+               manager.allowsBackgroundLocationUpdates &&
+               !isLowAccuracy &&
+               manager.distanceFilter != CLLocationDistanceMax
     }
     
     // Method to completely restore location manager state for tracking after app restart
