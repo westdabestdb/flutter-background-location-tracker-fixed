@@ -322,6 +322,12 @@ class LocationManager {
         // Check delegate
         if manager.delegate == nil {
             issues.append("No delegate set on location manager")
+        } else {
+            // Verify delegate is the correct type (SwiftBackgroundLocationTrackerPlugin)
+            let delegateType = String(describing: type(of: manager.delegate!))
+            if !delegateType.contains("SwiftBackgroundLocationTrackerPlugin") {
+                issues.append("Delegate is wrong type: \(delegateType) - should be SwiftBackgroundLocationTrackerPlugin")
+            }
         }
         
         // Check if needs reactivation

@@ -30,12 +30,19 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
     public static func setLocationManagerDelegate() {
         if let instance = pluginInstance {
             instance.locationManager.delegate = instance
+            CustomLogger.log(message: "✅ Location manager delegate set to Plugin")
+        } else {
+            CustomLogger.logCritical(message: "⚠️ SAFETY WARNING: Cannot set delegate - pluginInstance is nil")
+            CustomLogger.logCritical(message: "This should not happen - indicates initialization issue")
         }
     }
     
     public static func clearLocationManagerDelegate() {
         if let instance = pluginInstance {
             instance.locationManager.delegate = nil
+            CustomLogger.log(message: "✅ Location manager delegate cleared")
+        } else {
+            CustomLogger.log(message: "⚠️ Cannot clear delegate - pluginInstance is nil (may be expected during cleanup)")
         }
     }
     
@@ -66,16 +73,24 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
         // CRITICAL: Force stop location manager to ensure no more updates are received
         LocationManager.forceStopLocationManager()
         
+        // CRITICAL: Clear background method channel FIRST to prevent new messages
+        backgroundMethodChannel = nil
+        
         // CRITICAL: Destroy the background Flutter engine to prevent battery drain
         // This ensures no background processes can restart location services
         if let engine = flutterEngine {
             CustomLogger.logCritical(message: "🚨 DESTROYING BACKGROUND FLUTTER ENGINE TO PREVENT BATTERY DRAIN")
-            engine.destroyContext()
+            
+            // SAFETY: Give pending messages time to drain before destroying (250ms for safety margin)
+            // This prevents loss of in-flight location updates during shutdown
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                CustomLogger.logCritical(message: "🚨 Draining complete - destroying engine context")
+                engine.destroyContext()
+                CustomLogger.logCritical(message: "🚨 Background Flutter engine destroyed")
+            }
+            
             flutterEngine = nil
         }
-        
-        // CRITICAL: Clear background method channel to prevent any communication
-        backgroundMethodChannel = nil
         
         CustomLogger.logCritical(message: "🚨 FORCE CLEANUP COMPLETED - ALL LOCATION SERVICES AND BACKGROUND PROCESSES STOPPED")
     }
@@ -179,9 +194,8 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
                     if postRestorationHealth.isHealthy {
                         CustomLogger.log(message: "✅ Location tracking state restoration successful!")
                         
-                        // Start location services
+                        // Start location services with significant changes for battery efficiency
                         if let instance = pluginInstance {
-                            instance.locationManager.startUpdatingLocation()
                             instance.locationManager.startMonitoringSignificantLocationChanges()
                             CustomLogger.log(message: "Location services started after restoration")
                         }
@@ -219,6 +233,9 @@ extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
     }
     
     public static func register(with registrar: FlutterPluginRegistrar) {
+        CustomLogger.log(message: "=== PLUGIN REGISTRATION STARTED ===")
+        
+        // Initialize ForegroundChannel
         foregroundChannel = ForegroundChannel()
         let methodChannel = ForegroundChannel.createMethodChannel(binaryMessenger: registrar.messenger())
         let instance = SwiftBackgroundLocationTrackerPlugin()
@@ -226,6 +243,19 @@ extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
         // Store the plugin instance and method channel
         pluginInstance = instance
         foregroundMethodChannel = methodChannel
+        
+        // SAFETY: Verify initialization
+        if foregroundChannel == nil {
+            CustomLogger.logCritical(message: "🚨 CRITICAL: ForegroundChannel failed to initialize!")
+        } else {
+            CustomLogger.log(message: "✅ ForegroundChannel initialized successfully")
+        }
+        
+        if pluginInstance == nil {
+            CustomLogger.logCritical(message: "🚨 CRITICAL: Plugin instance failed to initialize!")
+        } else {
+            CustomLogger.log(message: "✅ Plugin instance initialized successfully")
+        }
         
         registrar.addMethodCallDelegate(instance, channel: methodChannel)
         registrar.addApplicationDelegate(instance)
@@ -238,10 +268,14 @@ extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
         
         // Only start if we were tracking before AND restartAfterKill is enabled
         if shouldRestartTracking() {
+            CustomLogger.log(message: "📍 Restarting tracking after app relaunch")
             instance.locationManager.delegate = instance
             instance.locationManager.startMonitoringSignificantLocationChanges()
-            instance.locationManager.startUpdatingLocation()
+        } else {
+            CustomLogger.log(message: "📍 Not restarting tracking - conditions not met")
         }
+        
+        CustomLogger.log(message: "=== PLUGIN REGISTRATION COMPLETED ===")
     }
     
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -322,14 +356,27 @@ extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
     public static func sendLocationupdate(locationData: [String: Any]){
         CustomLogger.logCritical(message: "🚨 sendLocationupdate called with data: \(locationData)")
         
+        // SAFETY: Verify background channel is ready
         guard let backgroundMethodChannel = SwiftBackgroundLocationTrackerPlugin.backgroundMethodChannel else {
-            CustomLogger.logCritical(message: "🚨 No background channel available for sending location update")
+            CustomLogger.logCritical(message: "🚨 SAFETY WARNING: No background channel available for sending location update")
+            CustomLogger.logCritical(message: "Location data will be cached until channel is initialized")
+            return
+        }
+        
+        // SAFETY: Verify engine is still alive
+        guard let _ = SwiftBackgroundLocationTrackerPlugin.flutterEngine else {
+            CustomLogger.logCritical(message: "🚨 SAFETY WARNING: Flutter engine is nil - cannot send location update")
+            CustomLogger.logCritical(message: "This may happen during shutdown or if engine failed to initialize")
             return
         }
         
         CustomLogger.logCritical(message: "🚨 Sending location update via background channel")
         backgroundMethodChannel.invokeMethod(BackgroundMethods.onLocationUpdate.rawValue, arguments: locationData, result: { flutterResult in
-            CustomLogger.logCritical(message: "🚨 Location update result: \(flutterResult.debugDescription)")
+            if let error = flutterResult as? FlutterError {
+                CustomLogger.logCritical(message: "🚨 Location update error: \(error.message ?? "unknown")")
+            } else {
+                CustomLogger.logCritical(message: "🚨 Location update sent successfully: \(flutterResult.debugDescription)")
+            }
         })
     }
 }
@@ -341,6 +388,89 @@ fileprivate enum BackgroundMethods: String {
 
 extension SwiftBackgroundLocationTrackerPlugin: CLLocationManagerDelegate {
     private static let BACKGROUND_CHANNEL_NAME = "com.icapps.background_location_tracker/background_channel"
+    
+    // MARK: - Authorization Change Handling
+    
+    // iOS 14+ authorization change handler
+    @available(iOS 14, *)
+    public func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        let status = manager.authorizationStatus
+        CustomLogger.log(message: "🔐 Authorization changed (iOS 14+): \(status.rawValue)")
+        handleAuthorizationChange(status)
+    }
+    
+    // iOS 13 and earlier authorization change handler
+    public func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
+        CustomLogger.log(message: "🔐 Authorization changed (iOS 13): \(status.rawValue)")
+        handleAuthorizationChange(status)
+    }
+    
+    // Common handler for authorization changes
+    private func handleAuthorizationChange(_ status: CLAuthorizationStatus) {
+        CustomLogger.log(message: "🔐 Processing authorization change: \(status.rawValue)")
+        
+        // SAFETY: Forward to ForegroundChannel for permission monitoring with nil check
+        if let channel = SwiftBackgroundLocationTrackerPlugin.foregroundChannel {
+            channel.handleAuthorizationChange(status)
+            CustomLogger.log(message: "✅ Authorization change forwarded to ForegroundChannel")
+        } else {
+            CustomLogger.logCritical(message: "⚠️ Cannot forward authorization - foregroundChannel is nil")
+            CustomLogger.logCritical(message: "This may happen during early initialization or after cleanup")
+            // This is not critical if tracking isn't active, but log it for diagnostics
+        }
+        
+        // If tracking is enabled but permission was revoked, clean up
+        if SharedPrefsUtil.isTracking() {
+            switch status {
+            case .denied, .restricted:
+                CustomLogger.logCritical(message: "🚨 Location permission denied/restricted while tracking - stopping services")
+                // Force cleanup since we can't track without permission
+                SwiftBackgroundLocationTrackerPlugin.forceCleanup()
+            case .notDetermined:
+                CustomLogger.log(message: "⚠️ Location permission not determined while tracking")
+                // Don't clean up. user might grant permission later
+            case .authorizedAlways, .authorizedWhenInUse:
+                CustomLogger.log(message: "✅ Location permission authorized - tracking can continue")
+            @unknown default:
+                CustomLogger.log(message: "⚠️ Unknown authorization status: \(status.rawValue)")
+            }
+        }
+    }
+    
+    // MARK: - Error Handling
+    
+    public func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        CustomLogger.logCritical(message: "🚨 Location manager error: \(error.localizedDescription)")
+        
+        if let clError = error as? CLError {
+            switch clError.code {
+            case .denied:
+                CustomLogger.logCritical(message: "🚨 Location services denied by user")
+                if SharedPrefsUtil.isTracking() {
+                    SwiftBackgroundLocationTrackerPlugin.forceCleanup()
+                }
+            case .locationUnknown:
+                CustomLogger.log(message: "⚠️ Location temporarily unknown - will retry")
+            case .network:
+                CustomLogger.log(message: "⚠️ Network-related location error")
+            default:
+                CustomLogger.logCritical(message: "🚨 CLError code: \(clError.code.rawValue)")
+            }
+        }
+    }
+    
+    public func locationManagerDidPauseLocationUpdates(_ manager: CLLocationManager) {
+        CustomLogger.log(message: "⏸️ Location updates paused by system")
+        if SharedPrefsUtil.isTracking() {
+            CustomLogger.log(message: "⚠️ Location updates paused while tracking is enabled - system may resume automatically")
+        }
+    }
+    
+    public func locationManagerDidResumeLocationUpdates(_ manager: CLLocationManager) {
+        CustomLogger.log(message: "▶️ Location updates resumed by system")
+    }
+    
+    // MARK: - App Lifecycle Handling
     
     // App lifecycle handling
     public func applicationWillTerminate(_ application: UIApplication) {
@@ -395,7 +525,6 @@ extension SwiftBackgroundLocationTrackerPlugin: CLLocationManagerDelegate {
                 
                 if let instance = SwiftBackgroundLocationTrackerPlugin.pluginInstance {
                     instance.locationManager.delegate = instance
-                    instance.locationManager.startUpdatingLocation()
                     instance.locationManager.startMonitoringSignificantLocationChanges()
                     CustomLogger.log(message: "Tracking restored after entering foreground")
                 }
