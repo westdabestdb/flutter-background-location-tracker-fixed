@@ -12,100 +12,82 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
+import com.google.android.gms.common.ConnectionResult
+import com.google.android.gms.common.GoogleApiAvailability
 import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationAvailability
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.icapps.background_location_tracker.flutter.FlutterBackgroundManager
-import com.icapps.background_location_tracker.utils.ActivityCounter
-import com.icapps.background_location_tracker.utils.Logger
-import com.icapps.background_location_tracker.utils.NotificationUtil
-import com.icapps.background_location_tracker.utils.SharedPrefsUtil
+import com.icapps.background_location_tracker.utils.*
 import java.io.PrintWriter
 import java.io.StringWriter
 
-private const val timeOut = 24 * 60 * 60 * 1000L /*24 hours max */
+private const val WAKELOCK_TIMEOUT = 10 * 60 * 1000L // 10 minutes
 
+/**
+ * Service for location updates in foreground and background.
+ * Refactored with consolidated startup logic, comprehensive error handling,
+ * and centralized state management.
+ */
 internal class LocationUpdatesService : Service() {
     private val binder: IBinder = LocalBinder()
-
-    /**
-     * Used to check whether the bound activity has really gone away and not unbound as part of an
-     * orientation change. We create a foreground service notification only if the former takes
-     * place.
-     */
+    
+    // Lifecycle state
     private var changingConfiguration = false
-
-    /**
-     * Contains parameters used by [com.google.android.gms.location.FusedLocationProviderApi].
-     */
+    
+    // Location components
     private var locationRequest: LocationRequest? = null
-
-    /**
-     * Provides access to the Fused Location Provider API.
-     */
     private var fusedLocationClient: FusedLocationProviderClient? = null
-
-    /**
-     * Callback for changes in location.
-     */
     private var locationCallback: LocationCallback? = null
-
-    private var wakeLock: PowerManager.WakeLock? = null
-
-    /**
-     * The current location.
-     */
     private var location: Location? = null
+    
+    // Power management
+    private var wakeLock: PowerManager.WakeLock? = null
+    
+    // Track if we've already requested location updates (prevent duplicates)
+    private var hasActiveLocationRequest = false
 
     override fun onCreate() {
-        Logger.debug(TAG, "ON CREATE SERVICE")
-        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
-        locationCallback = object : LocationCallback() {
-            override fun onLocationResult(locationResult: LocationResult) {
-                super.onLocationResult(locationResult)
-                onNewLocation(locationResult.lastLocation)
-            }
-        }
-        wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "mijnmooiestraat:location_updates")
-        createLocationRequest()
-        getLastLocation()
-
-        // Always start tracking if it's enabled, regardless of app state
-        if (SharedPrefsUtil.isTracking(this)) {
-            Logger.debug(TAG, "Tracking is enabled, starting immediately")
-            startTracking()
-        }
+        Logger.debug(TAG, "=== Service onCreate ===")
         
-        // Check if tracking is active and we should start tracking due to permission change
-        if (isTrackingActive() && hasLocationPermission() && !SharedPrefsUtil.isTracking(this)) {
-            Logger.debug(TAG, "Tracking is active and permission granted, starting tracking")
-            
-            // Ensure background manager is ready before starting tracking
-            FlutterBackgroundManager.ensureInitialized(this)
-            
-            startTracking()
-        }
+        // Initialize state manager
+        TrackingStateManager.initialize(this)
+        
+        // Initialize location components
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+        createLocationCallback()
+        createLocationRequest()
+        wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "blt:location_updates")
+        
+        // Get last known location
+        getLastLocation()
+        
+        // Check if we should auto-start tracking
+        handleServiceCreated()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Logger.debug(TAG, "Service started")
+        Logger.debug(TAG, "Service started via onStartCommand")
+        
         val startedFromNotification = intent?.getBooleanExtra(
             EXTRA_STARTED_FROM_NOTIFICATION,
             false
         ) ?: false
 
-        // We got here because the user decided to remove location updates from the notification.
         if (startedFromNotification) {
+            // User tapped "Stop" in notification
+            Logger.debug(TAG, "Stop requested from notification")
             stopTracking()
             stopSelf()
             return START_NOT_STICKY
         }
 
-
-        // Tells the system to try to recreate the service after it has been killed.
+        // Service restarted by system or started explicitly
         return START_STICKY
     }
 
@@ -114,20 +96,439 @@ internal class LocationUpdatesService : Service() {
         changingConfiguration = true
     }
 
-    override fun onBind(intent: Intent): IBinder? {
-        // Called when a client (MainActivity in case of this sample) comes to the foreground
-        // and binds with this service. The service should cease to be a foreground service
-        // when that happens.
-        Logger.debug(TAG, "OnBind")
-        // Don't stop foreground service if we're tracking - keep it running
-        if (!SharedPrefsUtil.isTracking(this)) {
+    override fun onBind(intent: Intent): IBinder {
+        Logger.debug(TAG, "Client bound to service")
+        changingConfiguration = false
+        
+        // Don't stop foreground if actively tracking
+        if (!TrackingStateManager.isTracking()) {
             stopForegroundService()
         }
-        changingConfiguration = false
+        
         return binder
     }
 
+    override fun onRebind(intent: Intent) {
+        Logger.debug(TAG, "Client rebound to service")
+        changingConfiguration = false
+        
+        if (!TrackingStateManager.isTracking()) {
+            stopForegroundService()
+        }
+        
+        super.onRebind(intent)
+    }
+
+    override fun onUnbind(intent: Intent): Boolean {
+        Logger.debug(TAG, "Last client unbound from service")
+
+        try {
+            if (!changingConfiguration && TrackingStateManager.isTracking()) {
+                Logger.debug(TAG, "Ensuring foreground service continues")
+                ensureForegroundService()
+            }
+        } catch (e: Throwable) {
+            val sw = StringWriter()
+            val pw = PrintWriter(sw)
+            e.printStackTrace(pw)
+            pw.flush()
+            Logger.error(TAG, "onUnbind failed: ${sw}")
+        }
+
+        return true // Ensures onRebind() is called
+    }
+
+    override fun onDestroy() {
+        Logger.debug(TAG, "=== Service onDestroy ===")
+        releaseWakeLock()
+        
+        // Clean up Flutter background resources
+        FlutterBackgroundManager.forceCleanup()
+    }
+
+    // ==================== CONSOLIDATED STARTUP LOGIC ====================
+    
+    /**
+     * Handle service creation - decide if we should auto-start tracking
+     */
+    private fun handleServiceCreated() {
+        Logger.debug(TAG, "Handling service created, checking if should auto-start")
+        
+        val state = TrackingStateManager.getState()
+        Logger.debug(TAG, "Current state: ${state::class.simpleName}")
+        
+        when (state) {
+            is TrackingStateManager.TrackingState.Starting,
+            is TrackingStateManager.TrackingState.Running -> {
+                // We were tracking before, try to restart
+                Logger.debug(TAG, "Was tracking before service restart, attempting to resume")
+                startLocationTrackingInternal("service_restart")
+            }
+            is TrackingStateManager.TrackingState.WaitingForPermission -> {
+                // Check if permission is now available
+                if (PermissionChecker.hasForegroundLocationPermission(this)) {
+                    Logger.debug(TAG, "Permission now available, attempting to start")
+                    startLocationTrackingInternal("permission_granted")
+                } else {
+                    Logger.debug(TAG, "Still waiting for permission")
+                }
+            }
+            else -> {
+                Logger.debug(TAG, "State is ${state::class.simpleName}, not auto-starting")
+            }
+        }
+    }
+
+    /**
+     * MAIN ENTRY POINT: Start location tracking
+     * This is the ONLY method that actually starts location updates.
+     * All other entry points must call this method.
+     */
+    fun startTracking() {
+        startLocationTrackingInternal("direct_call")
+    }
+    
+    /**
+     * Internal consolidated startup logic with all safety checks
+     */
+    private fun startLocationTrackingInternal(source: String): Result<Unit, TrackingError> {
+        Logger.debug(TAG, "=== startLocationTrackingInternal from: $source ===")
+        
+        // STEP 1: Check if already tracking (prevent duplicates)
+        if (hasActiveLocationRequest) {
+            Logger.debug(TAG, "Already have active location request, ignoring duplicate start")
+            return Result.Success(Unit)
+        }
+        
+        if (TrackingStateManager.getState() is TrackingStateManager.TrackingState.Running) {
+            Logger.debug(TAG, "Already in Running state, ignoring duplicate start")
+            return Result.Success(Unit)
+        }
+        
+        // STEP 2: Update state to Starting
+        TrackingStateManager.setState(TrackingStateManager.TrackingState.Starting, this)
+        
+        // STEP 3: Perform comprehensive health check
+        Logger.debug(TAG, "Performing health check...")
+        val healthCheck = HealthCheck.performHealthCheck(this)
+        HealthCheck.logHealthCheck(this)
+        
+        if (!healthCheck.canStartTracking) {
+            Logger.error(TAG, "Health check failed with ${healthCheck.criticalIssues.size} critical issues")
+            
+            // Determine specific error
+            val error = when {
+                healthCheck.criticalIssues.any { it.code == "play_services_missing" || it.code == "play_services_outdated" } -> {
+                    val issue = healthCheck.criticalIssues.first { it.code.startsWith("play_services") }
+                    TrackingError.GooglePlayServicesUnavailable(0)
+                }
+                healthCheck.criticalIssues.any { it.code == "no_location_permission" } -> {
+                    TrackingError.PermissionDenied()
+                }
+                healthCheck.criticalIssues.any { it.code == "no_background_permission" } -> {
+                    TrackingError.BackgroundPermissionDenied()
+                }
+                healthCheck.criticalIssues.any { it.code == "no_notification_permission" } -> {
+                    TrackingError.NotificationPermissionDenied()
+                }
+                healthCheck.criticalIssues.any { it.code == "location_disabled" } -> {
+                    TrackingError.LocationDisabled()
+                }
+                else -> {
+                    TrackingError.PreflightFailed(healthCheck.criticalIssues)
+                }
+            }
+            
+            // Update state and report error
+            TrackingStateManager.setState(
+                TrackingStateManager.TrackingState.Error(error.code, error.message),
+                this
+            )
+            FlutterBackgroundManager.sendTrackingError(this, error)
+            
+            return Result.Error(error)
+        }
+        
+        // STEP 4: Ensure Flutter background manager is initialized
+        FlutterBackgroundManager.ensureInitialized(this)
+        
+        // STEP 5: Start as foreground service (required for background tracking)
+        val foregroundResult = ensureForegroundService()
+        if (foregroundResult is Result.Error) {
+            TrackingStateManager.setState(
+                TrackingStateManager.TrackingState.Error(foregroundResult.error.code, foregroundResult.error.message),
+                this
+            )
+            return foregroundResult
+        }
+        
+        // STEP 6: Acquire wake lock
+        acquireWakeLock()
+        
+        // STEP 7: Actually request location updates
+        val requestResult = requestLocationUpdatesInternal()
+        
+        return when (requestResult) {
+            is Result.Success -> {
+                Logger.debug(TAG, "✓ Location tracking started successfully")
+                hasActiveLocationRequest = true
+                
+                // State will transition to Running when first location is received
+                // For now, keep it in Starting state
+                
+                Result.Success(Unit)
+            }
+            is Result.Error -> {
+                // Clean up on failure
+                releaseWakeLock()
+                stopForegroundService()
+                TrackingStateManager.setState(
+                    TrackingStateManager.TrackingState.Error(requestResult.error.code, requestResult.error.message),
+                    this
+                )
+                FlutterBackgroundManager.sendTrackingError(this, requestResult.error)
+                
+                requestResult
+            }
+        }
+    }
+    
+    /**
+     * Actually request location updates from FusedLocationProvider
+     */
+    private fun requestLocationUpdatesInternal(): Result<Unit, TrackingError> {
+        val request = locationRequest
+        val callback = locationCallback
+        val client = fusedLocationClient
+        
+        if (request == null || callback == null || client == null) {
+            val error = TrackingError.ServiceStartFailed("Location components not initialized")
+            Logger.error(TAG, error.message)
+            return Result.Error(error)
+        }
+        
+        try {
+            Logger.debug(TAG, "Requesting location updates from FusedLocationProvider")
+            
+            // Use main looper to avoid null issues
+            client.requestLocationUpdates(
+                request,
+                callback,
+                Looper.getMainLooper()
+            )
+            
+            Logger.debug(TAG, "Location updates requested successfully")
+            return Result.Success(Unit)
+            
+        } catch (e: SecurityException) {
+            val error = TrackingError.PermissionDenied()
+            Logger.error(TAG, "SecurityException: ${e.message}")
+            return Result.Error(error)
+            
+        } catch (e: Exception) {
+            val error = TrackingError.Unknown(e)
+            Logger.error(TAG, "Exception requesting location updates: ${e.message}")
+            return Result.Error(error)
+        }
+    }
+
+    // ==================== STOP TRACKING ====================
+
+    /**
+     * Stop location tracking
+     */
+    fun stopTracking() {
+        Logger.debug(TAG, "=== stopTracking ===")
+        
+        // Update state
+        TrackingStateManager.setState(TrackingStateManager.TrackingState.Stopping, this)
+        
+        // Release wake lock
+        releaseWakeLock()
+        
+        // Remove location updates
+        val callback = locationCallback
+        if (callback != null) {
+            try {
+                fusedLocationClient?.removeLocationUpdates(callback)
+                Logger.debug(TAG, "Location updates removed")
+                hasActiveLocationRequest = false
+            } catch (e: SecurityException) {
+                Logger.error(TAG, "SecurityException removing updates: ${e.message}")
+            } catch (e: Exception) {
+                Logger.error(TAG, "Exception removing updates: ${e.message}")
+            }
+        }
+        
+        // Reset counters
+        TrackingStateManager.resetCounters()
+        
+        // Update to Stopped state
+        TrackingStateManager.setState(TrackingStateManager.TrackingState.Stopped, this)
+        
+        // Stop self
+        stopSelf()
+    }
+
+    // ==================== PERMISSION MONITORING ====================
+    
+    /**
+     * Re-check permissions (called when app resumes)
+     */
+    fun recheckPermissions() {
+        Logger.debug(TAG, "Re-checking permissions due to app lifecycle change")
+        
+        val state = TrackingStateManager.getState()
+        
+        // Only restart if we're in a waiting state and now have permission
+        if (state is TrackingStateManager.TrackingState.WaitingForPermission) {
+            if (PermissionChecker.hasForegroundLocationPermission(this)) {
+                Logger.debug(TAG, "Permission granted, restarting tracking")
+                startLocationTrackingInternal("permission_recheck")
+            } else {
+                Logger.debug(TAG, "Still no permission")
+            }
+        }
+    }
+
+    // ==================== LOCATION CALLBACK ====================
+    
+    /**
+     * Create location callback with error handling
+     */
+    private fun createLocationCallback() {
+        locationCallback = object : LocationCallback() {
+            override fun onLocationResult(locationResult: LocationResult) {
+                super.onLocationResult(locationResult)
+                val newLocation = locationResult.lastLocation
+                if (newLocation != null) {
+                    onNewLocation(newLocation)
+                }
+            }
+            
+            /**
+             * IMPORTANT: Handle location availability changes
+             * This catches when GPS is lost, location services disabled, etc.
+             */
+            override fun onLocationAvailability(availability: LocationAvailability) {
+                super.onLocationAvailability(availability)
+                
+                if (!availability.isLocationAvailable) {
+                    Logger.warning(TAG, "⚠️ Location became unavailable")
+                    
+                    val error = TrackingError.LocationUnavailable()
+                    FlutterBackgroundManager.sendTrackingError(applicationContext, error)
+                    
+                    // Update state but don't stop tracking - might recover
+                    TrackingStateManager.setState(
+                        TrackingStateManager.TrackingState.Error(error.code, error.message),
+                        applicationContext
+                    )
+                } else {
+                    Logger.debug(TAG, "✓ Location is available again")
+                    
+                    // If we were in error state due to unavailability, transition back to Starting
+                    val currentState = TrackingStateManager.getState()
+                    if (currentState is TrackingStateManager.TrackingState.Error && 
+                        currentState.errorCode == "location_unavailable") {
+                        TrackingStateManager.setState(
+                            TrackingStateManager.TrackingState.Starting,
+                            applicationContext
+                        )
+                    }
+                }
+            }
+        }
+    }
+    
+    /**
+     * Handle new location update
+     */
+    private fun onNewLocation(newLocation: Location) {
+        Logger.debug(TAG, "New location: ${newLocation.latitude}, ${newLocation.longitude}")
+        location = newLocation
+        
+        // Record location update in state manager
+        TrackingStateManager.recordLocationUpdate(this)
+        
+        // Send to Flutter (handles both foreground and background)
+        FlutterBackgroundManager.sendLocation(applicationContext, newLocation)
+        
+        // Update notification if enabled
+        if (SharedPrefsUtil.isNotificationLocationUpdatesEnabled(applicationContext)) {
+            Logger.debug(TAG, "Updating notification with location")
+            NotificationUtil.showNotification(this, newLocation)
+        }
+    }
+
+    // ==================== HELPER METHODS ====================
+
+    /**
+     * Create location request configuration
+     */
+    private fun createLocationRequest() {
+        val interval = SharedPrefsUtil.trackingInterval(this)
+        val distanceFilter = SharedPrefsUtil.distanceFilter(this)
+        
+        locationRequest = LocationRequest.create()
+            .setInterval(interval)
+            .setFastestInterval(interval / 2)
+            .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
+            .setSmallestDisplacement(distanceFilter)
+        
+        Logger.debug(TAG, "Location request created: interval=${interval}ms, distance=${distanceFilter}m")
+    }
+
+    /**
+     * Get last known location
+     */
+    private fun getLastLocation() {
+        try {
+            fusedLocationClient?.lastLocation?.addOnCompleteListener { task ->
+                if (task.isSuccessful && task.result != null) {
+                    location = task.result
+                    Logger.debug(TAG, "Got last known location")
+                } else {
+                    Logger.warning(TAG, "Failed to get last location")
+                }
+            }
+        } catch (unlikely: SecurityException) {
+            Logger.error(TAG, "SecurityException getting last location: ${unlikely.message}")
+        }
+    }
+    
+    /**
+     * Ensure service is running in foreground
+     */
+    private fun ensureForegroundService(): Result<Unit, TrackingError> {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                Logger.debug(TAG, "Starting foreground service")
+                NotificationUtil.startForeground(this, location)
+                return Result.Success(Unit)
+                
+            } catch (e: Exception) {
+                Logger.error(TAG, "Failed to start foreground service: ${e.message}")
+                
+                val error = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && 
+                               e::class.simpleName == "ForegroundServiceStartNotAllowedException") {
+                    TrackingError.ForegroundServiceRestricted()
+                } else {
+                    TrackingError.ServiceStartFailed(e.message ?: "Unknown error")
+                }
+                
+                return Result.Error(error)
+            }
+        }
+        
+        return Result.Success(Unit)
+    }
+    
+    /**
+     * Stop foreground service
+     */
     private fun stopForegroundService() {
+        Logger.debug(TAG, "Stopping foreground service")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -135,250 +536,35 @@ internal class LocationUpdatesService : Service() {
             stopForeground(true)
         }
     }
-
-    override fun onRebind(intent: Intent) {
-        // Called when a client (MainActivity in case of this sample) returns to the foreground
-        // and binds once again with this service. The service should cease to be a foreground
-        // service when that happens.
-        Logger.debug(TAG, "OnRebind")
-        // Don't stop foreground service if we're tracking - keep it running
-        if (!SharedPrefsUtil.isTracking(this)) {
-            stopForegroundService()
+    
+    /**
+     * Acquire wake lock for processing
+     */
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld != true) {
+            wakeLock?.acquire(WAKELOCK_TIMEOUT)
+            Logger.debug(TAG, "WakeLock acquired")
         }
-        changingConfiguration = false
-        super.onRebind(intent)
     }
-
-    override fun onUnbind(intent: Intent): Boolean {
-        Logger.debug(TAG, "Last client unbound from service")
-
-        // Called when the last client (MainActivity in case of this sample) unbinds from this
-        // service. If this method is called due to a configuration change in MainActivity, we
-        // do nothing. Otherwise, we make this service a foreground service.
-
-        try {
-            if (!changingConfiguration && SharedPrefsUtil.isTracking(this)) {
-                Logger.debug(TAG, "Ensuring foreground service continues")
-                if (wakeLock?.isHeld != true) {
-                    wakeLock?.acquire(timeOut)
-                }
-                // Foreground service should already be running, just ensure it continues
-                NotificationUtil.startForeground(this, location)
-            }
-        } catch(e:Throwable) {
-            val sw = StringWriter()
-            val pw = PrintWriter(sw)
-            e.printStackTrace(pw)
-            pw.flush()
-            Logger.error(sw.toString(),"onUnbind failed to execute");
-        }
-
-        return true // Ensures onRebind() is called when a client re-binds.
-    }
-
-    override fun onDestroy() {
-        Logger.debug(TAG, "Destroy")
+    
+    /**
+     * Release wake lock
+     */
+    private fun releaseWakeLock() {
         if (wakeLock?.isHeld == true) {
             wakeLock?.release()
-        }
-        
-        // Force clean up Flutter background resources when service is destroyed
-        FlutterBackgroundManager.forceCleanup()
-    }
-
-    /**
-     * Makes a request for location updates. Note that in this sample we merely log the
-     * [SecurityException].
-     */
-    fun startTracking() {
-        wakeLock?.acquire(timeOut)
-
-        Logger.debug(TAG, "Requesting location updates")
-        SharedPrefsUtil.saveIsTracking(this, true)
-        
-        // Set tracking active state to enable permission monitoring
-        SharedPrefsUtil.saveTrackingActive(this, true)
-        
-        // Ensure we're running as foreground service if needed
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            try {
-                NotificationUtil.startForeground(this, location)
-                Logger.debug(TAG, "Started as foreground service")
-            } catch (e: Exception) {
-                Logger.error(TAG, "Failed to start foreground service: ${e.message}")
-                if (wakeLock?.isHeld == true) {
-                    wakeLock?.release()
-                }
-                SharedPrefsUtil.saveIsTracking(this, false)
-                return
-            }
-        }
-        
-        val locationRequest = locationRequest ?: return
-        val locationCallback = locationCallback ?: return
-        try {
-            fusedLocationClient?.requestLocationUpdates(locationRequest, locationCallback, Looper.myLooper())
-        } catch (unlikely: SecurityException) {
-            if (wakeLock?.isHeld == true) {
-                wakeLock?.release()
-            }
-            SharedPrefsUtil.saveIsTracking(this, false)
-            Logger.error(TAG, "Lost location permission. Could not request updates. $unlikely")
-            
-            // Check if tracking is active and permission was lost - this might be a temporary issue
-            if (isTrackingActive()) {
-                Logger.debug(TAG, "Tracking is active but permission lost, will retry when permission is granted")
-            }
-        }
-    }
-    
-    /**
-     * Checks if tracking is currently active
-     */
-    private fun isTrackingActive(): Boolean {
-        return SharedPrefsUtil.isTrackingActive(this)
-    }
-    
-    /**
-     * Sets the tracking active state
-     */
-    fun setTrackingActive(isActive: Boolean) {
-        SharedPrefsUtil.saveTrackingActive(this, isActive)
-        Logger.debug(TAG, "Tracking active state set to: $isActive")
-        
-        if (isActive) {
-            // Check if we have permission and can start tracking
-            if (hasLocationPermission()) {
-                Logger.debug(TAG, "Tracking active and permission granted, starting tracking")
-                startTracking()
-            } else {
-                Logger.debug(TAG, "Tracking active but no permission, waiting for permission")
-            }
-        }
-    }
-    
-    /**
-     * Checks if location permission is granted
-     */
-    private fun hasLocationPermission(): Boolean {
-        return checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == 
-            android.content.pm.PackageManager.PERMISSION_GRANTED ||
-            checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) == 
-            android.content.pm.PackageManager.PERMISSION_GRANTED
-    }
-    
-    /**
-     * Re-checks permissions when app becomes active
-     */
-    fun recheckPermissions() {
-        Logger.debug(TAG, "Re-checking permissions due to app lifecycle change")
-        
-        if (isTrackingActive() && hasLocationPermission() && !SharedPrefsUtil.isTracking(this)) {
-            Logger.debug(TAG, "Tracking is active, permission granted, and not tracking - starting tracking")
-            
-            // Ensure background manager is ready before starting tracking
-            FlutterBackgroundManager.ensureInitialized(this)
-            
-            startTracking()
+            Logger.debug(TAG, "WakeLock released")
         }
     }
 
-    /**
-     * Removes location updates. Note that in this sample we merely log the
-     * [SecurityException].
-     */
-    fun stopTracking() {
-        if (wakeLock?.isHeld == true) {
-            wakeLock?.release();
-        }
-        Logger.debug(TAG, "Removing location updates")
-        val locationCallback = locationCallback ?: return
-        try {
-            fusedLocationClient?.removeLocationUpdates(locationCallback)
-            SharedPrefsUtil.saveIsTracking(this, false)
-            
-            // Clear tracking active state
-            SharedPrefsUtil.saveTrackingActive(this, false)
-            stopSelf()
-        } catch (unlikely: SecurityException) {
-            SharedPrefsUtil.saveIsTracking(this, true)
-            Logger.error(TAG, "Lost location permission. Could not remove updates. $unlikely")
-        }
-    }
+    // ==================== BINDER ====================
 
-    private fun getLastLocation() {
-        try {
-            fusedLocationClient?.lastLocation?.addOnCompleteListener { task ->
-                if (task.isSuccessful && task.result != null) {
-                    location = task.result
-                } else {
-                    Logger.warning(TAG, "Failed to get location.")
-                }
-            }
-        } catch (unlikely: SecurityException) {
-            Logger.error(TAG, "Lost location permission.$unlikely")
-        }
-    }
-
-    private fun onNewLocation(location: Location?) {
-        if (location == null) return;
-        Logger.debug(TAG, "New location: $location")
-        this.location = location
-
-        // Always send to Flutter when tracking is enabled, regardless of service state
-        if (SharedPrefsUtil.isTracking(this)) {
-            if (SharedPrefsUtil.isNotificationLocationUpdatesEnabled(applicationContext)) {
-                Logger.debug(TAG, "Notification updates are enabled. So we update the notification")
-                NotificationUtil.showNotification(this, location)
-            }
-            FlutterBackgroundManager.sendLocation(applicationContext, location)
-        } else {
-            // Only use local broadcast when not tracking
-            val intent = Intent(ACTION_BROADCAST)
-            intent.putExtra(EXTRA_LOCATION, location)
-            LocalBroadcastManager.getInstance(applicationContext).sendBroadcast(intent)
-        }
-    }
-
-    /**
-     * Sets the location request parameters.
-     */
-    private fun createLocationRequest() {
-        val interval = SharedPrefsUtil.trackingInterval(this)
-        val distanceFilter = SharedPrefsUtil.distanceFilter(this)
-        locationRequest = LocationRequest.create()
-            .setInterval(interval)
-            .setFastestInterval(interval / 2)
-            .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
-            .setSmallestDisplacement(distanceFilter)
-    }
-
-    /**
-     * Class used for the client Binder.  Since this service runs in the same process as its
-     * clients, we don't need to deal with IPC.
-     */
     inner class LocalBinder : Binder() {
         val service: LocationUpdatesService
             get() = this@LocationUpdatesService
     }
 
-    /**
-     * Returns true if this is a foreground service.
-     *
-     * @param context The [Context].
-     */
-    @Suppress("DEPRECATION")
-    private fun serviceIsRunningInForeground(context: Context): Boolean {
-        val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        for (service in manager.getRunningServices(Int.MAX_VALUE)) {
-            if (javaClass.name == service.service.className) {
-                if (service.foreground) {
-                    return true
-                }
-            }
-        }
-        return false
-    }
+    // ==================== COMPANION ====================
 
     companion object {
         private const val PACKAGE_NAME = "com.icapps.background_location_tracker"
@@ -389,20 +575,23 @@ internal class LocationUpdatesService : Service() {
         const val EXTRA_STARTED_FROM_NOTIFICATION = "$PACKAGE_NAME.started_from_notification"
 
         /**
-         * Starts the location service immediately. This method ensures the service
-         * is started without waiting for service binding, which can help avoid
-         * timing issues and ForegroundServiceStartNotAllowedException.
+         * Start service immediately
          */
         @JvmStatic
         fun startServiceImmediately(context: Context) {
             try {
                 val intent = Intent(context, LocationUpdatesService::class.java)
-                context.startService(intent)
-                Logger.debug(TAG, "Service started immediately via static method")
+                
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+                
+                Logger.debug(TAG, "Service started immediately")
             } catch (e: Exception) {
-                Logger.error(TAG, "Failed to start service immediately: ${e.message}")
+                Logger.error(TAG, "Failed to start service: ${e.message}")
             }
         }
-        
     }
 }

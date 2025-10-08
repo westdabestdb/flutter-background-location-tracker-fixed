@@ -9,26 +9,36 @@ import com.icapps.background_location_tracker.ext.checkRequiredFields
 import com.icapps.background_location_tracker.flutter.FlutterBackgroundManager
 import com.icapps.background_location_tracker.service.LocationServiceConnection
 import com.icapps.background_location_tracker.service.LocationUpdateListener
-import com.icapps.background_location_tracker.utils.Logger
-import com.icapps.background_location_tracker.utils.NotificationUtil
-import com.icapps.background_location_tracker.utils.SharedPrefsUtil
+import com.icapps.background_location_tracker.utils.*
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 
-internal class MethodCallHelper(private val ctx: Context) : MethodChannel.MethodCallHandler, LifecycleObserver, LocationUpdateListener {
+/**
+ * Handles method calls from Flutter and manages service lifecycle.
+ * Refactored to use centralized state management and consolidated startup logic.
+ */
+internal class MethodCallHelper(private val ctx: Context) : 
+    MethodChannel.MethodCallHandler, 
+    LifecycleObserver, 
+    LocationUpdateListener {
 
     private var serviceConnection = LocationServiceConnection(this)
-    private var isTrackingActive = false
 
     fun handle(call: MethodCall, result: MethodChannel.Result) = when (call.method) {
         "initialize" -> initialize(ctx, call, result)
         "isTracking" -> isTracking(ctx, call, result)
         "startTracking" -> startTracking(ctx, call, result)
         "stopTracking" -> stopTracking(ctx, call, result)
+        "getHealthCheck" -> getHealthCheck(ctx, result)
         else -> result.error("404", "${call.method} is not supported", null)
     }
 
+    // ==================== INITIALIZATION ====================
+
     private fun initialize(ctx: Context, call: MethodCall, result: MethodChannel.Result) {
+        Logger.debug(TAG, "=== Initializing ===")
+        
+        // Extract all configuration
         val callbackHandleKey = "callback_handle"
         val loggingEnabledKey = "logging_enabled"
         val trackingIntervalKey = "android_update_interval_msec"
@@ -39,17 +49,20 @@ internal class MethodCallHelper(private val ctx: Context) : MethodChannel.Method
         val enableCancelTrackingActionKey = "android_config_enable_cancel_tracking_action"
         val cancelTrackingActionTextKey = "android_config_cancel_tracking_action_text"
         val distanceFilterKey = "android_distance_filter"
+        
         val keys = listOf(
-                callbackHandleKey,
-                loggingEnabledKey,
-                channelNameKey,
-                notificationBodyKey,
-                enableNotificationLocationUpdatesKey,
-                cancelTrackingActionTextKey,
-                enableCancelTrackingActionKey,
-                trackingIntervalKey
+            callbackHandleKey,
+            loggingEnabledKey,
+            channelNameKey,
+            notificationBodyKey,
+            enableNotificationLocationUpdatesKey,
+            cancelTrackingActionTextKey,
+            enableCancelTrackingActionKey,
+            trackingIntervalKey
         )
+        
         if (!call.checkRequiredFields(keys, result)) return
+        
         val callbackHandle = getLongArgumentByKey(call, callbackHandleKey)!!
         val loggingEnabled = call.argument<Boolean>(loggingEnabledKey)!!
         val channelName = call.argument<String>(channelNameKey)!!
@@ -60,31 +73,40 @@ internal class MethodCallHelper(private val ctx: Context) : MethodChannel.Method
         val enableCancelTrackingAction = call.argument<Boolean>(enableCancelTrackingActionKey)!!
         val trackingInterval = getLongArgumentByKey(call, trackingIntervalKey)!!
         val distanceFilter = (call.argument<Double>(distanceFilterKey) ?: 0.0).toFloat()
+        
+        // Save configuration
         SharedPrefsUtil.saveLoggingEnabled(ctx, loggingEnabled)
         SharedPrefsUtil.saveTrackingInterval(ctx, trackingInterval)
         SharedPrefsUtil.saveDistanceFilter(ctx, distanceFilter)
-        Logger.enabled = loggingEnabled
-        NotificationUtil.createNotificationChannels(ctx, channelName)
         SharedPrefsUtil.saveCallbackDispatcherHandleKey(ctx, callbackHandle)
-        SharedPrefsUtil.saveNotificationConfig(ctx, notificationBody, notificationIcon, cancelTrackingActionText, enableNotificationLocationUpdates, enableCancelTrackingAction)
+        SharedPrefsUtil.saveNotificationConfig(
+            ctx, 
+            notificationBody, 
+            notificationIcon, 
+            cancelTrackingActionText, 
+            enableNotificationLocationUpdates, 
+            enableCancelTrackingAction
+        )
         
-        // CRITICAL: Restore tracking active state from previous session
-        isTrackingActive = SharedPrefsUtil.isTrackingActive(ctx)
-        if (isTrackingActive) {
-            Logger.debug(TAG, "Restoring tracking active state from previous session")
-            startPermissionMonitoring()
-            
-            // If we were tracking before app termination, check if we should restart tracking
-            if (SharedPrefsUtil.isTracking(ctx)) {
-                Logger.debug(TAG, "App was tracking before termination, checking if we should restart")
-                if (hasLocationPermission()) {
-                    Logger.debug(TAG, "Permission is granted, restarting tracking")
-                    handlePermissionGranted()
-                } else {
-                    Logger.debug(TAG, "Permission not granted, will wait for permission change")
-                }
-            }
+        // Enable logging
+        Logger.enabled = loggingEnabled
+        Logger.debug(TAG, "Logging enabled: $loggingEnabled")
+        
+        // Create notification channels
+        NotificationUtil.createNotificationChannels(ctx, channelName)
+        
+        // Initialize state manager
+        TrackingStateManager.initialize(ctx)
+        
+        // Log current state
+        Logger.debug(TAG, "State after init: ${TrackingStateManager.getState()::class.simpleName}")
+        
+        // Perform health check
+        if (loggingEnabled) {
+            HealthCheck.logHealthCheck(ctx)
+            PermissionChecker.logPermissionStatus(ctx)
         }
+        
         result.success(true)
     }
 
@@ -96,9 +118,18 @@ internal class MethodCallHelper(private val ctx: Context) : MethodChannel.Method
         }
     }
 
-    private fun isTracking(ctx: Context, call: MethodCall, result: MethodChannel.Result) = result.success(SharedPrefsUtil.isTracking(ctx))
+    // ==================== TRACKING CONTROL ====================
+
+    private fun isTracking(ctx: Context, call: MethodCall, result: MethodChannel.Result) {
+        val tracking = TrackingStateManager.isTracking()
+        Logger.debug(TAG, "isTracking query: $tracking")
+        result.success(tracking)
+    }
 
     private fun startTracking(ctx: Context, call: MethodCall, result: MethodChannel.Result) {
+        Logger.debug(TAG, "=== startTracking called from Flutter ===")
+        
+        // Update notification config if provided
         val notificationBodyKey = "android_config_notification_body"
         val notificationIconKey = "android_config_notification_icon"
         val enableNotificationLocationUpdatesKey = "android_config_enable_notification_location_updates"
@@ -110,151 +141,138 @@ internal class MethodCallHelper(private val ctx: Context) : MethodChannel.Method
         val enableNotificationLocationUpdates = call.argument<Boolean>(enableNotificationLocationUpdatesKey)
         val cancelTrackingActionText = call.argument<String>(cancelTrackingActionTextKey)
         val enableCancelTrackingAction = call.argument<Boolean>(enableCancelTrackingActionKey)
-        if (notificationBody != null || notificationIcon != null || cancelTrackingActionText != null
-                || enableNotificationLocationUpdates != null || enableCancelTrackingAction != null) {
-            SharedPrefsUtil.saveNotificationConfig(ctx, notificationBody ?: SharedPrefsUtil.getNotificationBody(ctx),
-                                                   notificationIcon ?: SharedPrefsUtil.getNotificationIcon(ctx),
-                                                   cancelTrackingActionText ?: SharedPrefsUtil.getCancelTrackingActionText(ctx),
-                                                   enableNotificationLocationUpdates ?: SharedPrefsUtil.isNotificationLocationUpdatesEnabled(ctx),
-                                                   enableCancelTrackingAction ?: SharedPrefsUtil.isCancelTrackingActionEnabled(ctx))
+        
+        if (notificationBody != null || notificationIcon != null || cancelTrackingActionText != null ||
+            enableNotificationLocationUpdates != null || enableCancelTrackingAction != null) {
+            SharedPrefsUtil.saveNotificationConfig(
+                ctx, 
+                notificationBody ?: SharedPrefsUtil.getNotificationBody(ctx),
+                notificationIcon ?: SharedPrefsUtil.getNotificationIcon(ctx),
+                cancelTrackingActionText ?: SharedPrefsUtil.getCancelTrackingActionText(ctx),
+                enableNotificationLocationUpdates ?: SharedPrefsUtil.isNotificationLocationUpdatesEnabled(ctx),
+                enableCancelTrackingAction ?: SharedPrefsUtil.isCancelTrackingActionEnabled(ctx)
+            )
         }
         
-        // Persist tracking intent BEFORE starting the service so a freshly created
-        // service (after logout -> stopSelf) will auto-start in onCreate()
-        SharedPrefsUtil.saveIsTracking(ctx, true)
+        // Perform health check before starting
+        val healthCheck = HealthCheck.performHealthCheck(ctx)
+        if (!healthCheck.canStartTracking) {
+            Logger.error(TAG, "Cannot start tracking - health check failed")
+            HealthCheck.logHealthCheck(ctx)
+            
+            // Return error to Flutter
+            val firstCritical = healthCheck.criticalIssues.firstOrNull()
+            result.error(
+                firstCritical?.code ?: "preflight_failed",
+                firstCritical?.message ?: "Pre-flight checks failed",
+                mapOf(
+                    "issues" to healthCheck.criticalIssues.map { 
+                        mapOf(
+                            "code" to it.code,
+                            "message" to it.message,
+                            "userAction" to it.userActionRequired
+                        )
+                    }
+                )
+            )
+            return
+        }
         
-        // Set tracking active state to enable permission monitoring
-        isTrackingActive = true
-        SharedPrefsUtil.saveTrackingActive(ctx, true)
-
-        // Start the service immediately to avoid timing issues
+        // Update state to Starting
+        TrackingStateManager.setState(TrackingStateManager.TrackingState.Starting, ctx)
+        
+        // Start the service
         com.icapps.background_location_tracker.service.LocationUpdatesService.startServiceImmediately(ctx)
         
-        // Ensure service connection is established and start tracking
+        // Bind to service
         serviceConnection.bound(ctx)
         
-        // Try to start tracking through service connection
+        // Request tracking through service
         serviceConnection.service?.startTracking()
+        
+        Logger.debug(TAG, "Start tracking request sent")
         result.success(true)
     }
 
     private fun stopTracking(ctx: Context, call: MethodCall, result: MethodChannel.Result) {
-        // Persist stop intent immediately in case the service isn't currently bound/running
-        SharedPrefsUtil.saveIsTracking(ctx, false)
+        Logger.debug(TAG, "=== stopTracking called from Flutter ===")
         
-        // Clear tracking active state
-        isTrackingActive = false
-        SharedPrefsUtil.saveTrackingActive(ctx, false)
+        // Update state to Stopping
+        TrackingStateManager.setState(TrackingStateManager.TrackingState.Stopping, ctx)
+        
+        // Stop tracking through service
         serviceConnection.service?.stopTracking()
+        
+        // Clean up Flutter background resources
         FlutterBackgroundManager.forceCleanup()
+        
+        Logger.debug(TAG, "Stop tracking request sent")
         result.success(true)
     }
 
-    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {}
+    // ==================== HEALTH CHECK ====================
+
+    private fun getHealthCheck(ctx: Context, result: MethodChannel.Result) {
+        Logger.debug(TAG, "Health check requested")
+        val healthCheckMap = HealthCheck.getHealthCheckMap(ctx)
+        result.success(healthCheckMap)
+    }
+
+    // ==================== LIFECYCLE ====================
 
     @OnLifecycleEvent(Lifecycle.Event.ON_START)
     fun onStart() {
+        Logger.debug(TAG, "Activity started")
         serviceConnection.bound(ctx)
     }
 
     @OnLifecycleEvent(Lifecycle.Event.ON_RESUME)
     fun onResume() {
+        Logger.debug(TAG, "Activity resumed")
         serviceConnection.onResume(ctx)
         
-        // Re-check permissions when app resumes (user might have granted permission in settings)
-        if (isTrackingActive) {
-            Logger.debug(TAG, "App resumed, re-checking location permission")
-            val hasLocationPermission = hasLocationPermission()
-            Logger.debug(TAG, "Permission status on resume: $hasLocationPermission")
+        // Re-check permissions and state
+        if (TrackingStateManager.wantsToTrack()) {
+            Logger.debug(TAG, "App resumed and wants to track, checking permissions")
+            PermissionChecker.logPermissionStatus(ctx)
             
-            if (hasLocationPermission) {
-                handlePermissionGranted()
-            }
-            
-            // Also ask the service to re-check permissions
+            // Ask service to recheck permissions
             serviceConnection.service?.recheckPermissions()
         }
     }
 
     @OnLifecycleEvent(Lifecycle.Event.ON_PAUSE)
     fun onPause() {
+        Logger.debug(TAG, "Activity paused")
         serviceConnection.onPause(ctx)
     }
 
     @OnLifecycleEvent(Lifecycle.Event.ON_STOP)
     fun onStop() {
+        Logger.debug(TAG, "Activity stopped")
         serviceConnection.onStop(ctx)
     }
 
-    override fun onLocationUpdate(location: Location) = FlutterBackgroundManager.sendLocation(ctx, location)
+    // ==================== LOCATION UPDATES ====================
 
-    
-    private fun startPermissionMonitoring() {
-        Logger.debug(TAG, "Starting location permission monitoring")
-        
-        // Check current permission status
-        val hasLocationPermission = hasLocationPermission()
-        Logger.debug(TAG, "Current location permission status: $hasLocationPermission")
-        
-        // If already granted, start tracking immediately
-        if (hasLocationPermission) {
-            handlePermissionGranted()
-        }
-        
-        // Note: For Android, we'll check permission status when the service tries to start
-        // The service will handle the permission check and call handlePermissionGranted if needed
+    override fun onLocationUpdate(location: Location) {
+        // Forward to Flutter (only used when bound to service in foreground)
+        FlutterBackgroundManager.sendLocation(ctx, location)
     }
-    
-    private fun stopPermissionMonitoring() {
-        Logger.debug(TAG, "Stopping location permission monitoring")
-        // Permission monitoring is handled by the service, no specific cleanup needed
+
+    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        // Not used
     }
-    
-    private fun hasLocationPermission(): Boolean {
-        return android.content.pm.PackageManager.PERMISSION_GRANTED == 
-            ctx.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) ||
-            android.content.pm.PackageManager.PERMISSION_GRANTED == 
-            ctx.checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION)
-    }
-    
-    private fun handlePermissionGranted() {
-        if (!isTrackingActive) {
-            Logger.debug(TAG, "Permission granted but tracking is not active, skipping auto-start")
-            return
-        }
-        
-        Logger.debug(TAG, "Location permission granted and tracking is active, starting tracking")
-        
-        // Check if we're already tracking to avoid duplicate calls
-        if (SharedPrefsUtil.isTracking(ctx)) {
-            Logger.debug(TAG, "Already tracking, skipping duplicate start")
-            return
-        }
-        
-        // Ensure background manager is ready before starting tracking
-        FlutterBackgroundManager.ensureInitialized(ctx)
-        
-        // Start tracking by setting the state and starting the service
-        SharedPrefsUtil.saveIsTracking(ctx, true)
-        SharedPrefsUtil.saveTrackingActive(ctx, true)
-        
-        // Start the service immediately
-        com.icapps.background_location_tracker.service.LocationUpdatesService.startServiceImmediately(ctx)
-        
-        // Ensure service connection is established and start tracking
-        serviceConnection.bound(ctx)
-        
-        // Try to start tracking through service connection
-        serviceConnection.service?.startTracking()
-        
-        Logger.debug(TAG, "Auto-started background location tracking")
-    }
+
+    // ==================== CLEANUP ====================
 
     fun cleanup() {
         Logger.debug(TAG, "Cleaning up MethodCallHelper")
         serviceConnection.onStop(ctx)
         serviceConnection = LocationServiceConnection(this)
     }
+
+    // ==================== COMPANION ====================
 
     companion object {
         private val TAG = MethodCallHelper::class.java.simpleName

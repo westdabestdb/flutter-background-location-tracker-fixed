@@ -195,4 +195,33 @@ internal object FlutterBackgroundManager {
             setupBackgroundChannelIfNeeded(ctx)
         }
     }
+    
+    /**
+     * Send error to Flutter
+     */
+    fun sendError(ctx: Context, errorCode: String, errorMessage: String, userMessage: String? = null) {
+        Logger.error("BackgroundManager", "Sending error to Flutter: $errorCode - $errorMessage")
+        
+        val data = mutableMapOf<String, Any>(
+            "error_code" to errorCode,
+            "error_message" to errorMessage,
+            "timestamp" to System.currentTimeMillis()
+        )
+        
+        userMessage?.let { data["user_message"] = it }
+        
+        try {
+            backgroundChannel?.invokeMethod("onTrackingError", data)
+            Logger.debug("BackgroundManager", "Error sent to Flutter successfully")
+        } catch (e: Exception) {
+            Logger.error("BackgroundManager", "Failed to send error to Flutter: ${e.message}")
+        }
+    }
+    
+    /**
+     * Send error object to Flutter
+     */
+    fun sendTrackingError(ctx: Context, error: com.icapps.background_location_tracker.utils.TrackingError) {
+        sendError(ctx, error.code, error.message, error.userMessage)
+    }
 }
