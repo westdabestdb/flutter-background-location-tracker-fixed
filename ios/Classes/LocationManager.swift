@@ -28,6 +28,14 @@ class LocationManager {
     class func shared() -> CLLocationManager {
         return sharedLocationManager
     }
+
+    // Significant-change monitoring alone ignores distanceFilter and is throttled by iOS
+    // to roughly one fix per 5 minutes. Standard updates give the configured cadence;
+    // significant-change stays on so iOS relaunches the app after a kill.
+    class func startTrackingUpdates(_ manager: CLLocationManager) {
+        manager.startUpdatingLocation()
+        manager.startMonitoringSignificantLocationChanges()
+    }
     
     // Method to completely reset the location manager state
     class func reset() {

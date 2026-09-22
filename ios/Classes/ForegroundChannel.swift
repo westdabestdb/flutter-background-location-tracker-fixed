@@ -342,9 +342,8 @@ public class ForegroundChannel : NSObject {
             CustomLogger.logCritical(message: "Location updates will be cached and sent when engine initializes")
         }
         
-        // Start location services
-        locationManager.startMonitoringSignificantLocationChanges()
-        CustomLogger.log(message: "✅ Significant location change monitoring started")
+        LocationManager.startTrackingUpdates(locationManager)
+        CustomLogger.log(message: "✅ Location updates and significant change monitoring started")
         
         // Verify tracking is properly configured
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {

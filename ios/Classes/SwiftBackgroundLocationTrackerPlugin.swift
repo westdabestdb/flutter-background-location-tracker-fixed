@@ -194,9 +194,8 @@ public class SwiftBackgroundLocationTrackerPlugin: FlutterPluginAppLifeCycleDele
                     if postRestorationHealth.isHealthy {
                         CustomLogger.log(message: "✅ Location tracking state restoration successful!")
                         
-                        // Start location services with significant changes for battery efficiency
                         if let instance = pluginInstance {
-                            instance.locationManager.startMonitoringSignificantLocationChanges()
+                            LocationManager.startTrackingUpdates(instance.locationManager)
                             CustomLogger.log(message: "Location services started after restoration")
                         }
                     } else {
@@ -270,7 +269,7 @@ extension SwiftBackgroundLocationTrackerPlugin: FlutterPlugin {
         if shouldRestartTracking() {
             CustomLogger.log(message: "📍 Restarting tracking after app relaunch")
             instance.locationManager.delegate = instance
-            instance.locationManager.startMonitoringSignificantLocationChanges()
+            LocationManager.startTrackingUpdates(instance.locationManager)
         } else {
             CustomLogger.log(message: "📍 Not restarting tracking - conditions not met")
         }
@@ -525,7 +524,7 @@ extension SwiftBackgroundLocationTrackerPlugin: CLLocationManagerDelegate {
                 
                 if let instance = SwiftBackgroundLocationTrackerPlugin.pluginInstance {
                     instance.locationManager.delegate = instance
-                    instance.locationManager.startMonitoringSignificantLocationChanges()
+                    LocationManager.startTrackingUpdates(instance.locationManager)
                     CustomLogger.log(message: "Tracking restored after entering foreground")
                 }
             }

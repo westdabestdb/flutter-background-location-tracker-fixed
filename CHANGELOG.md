@@ -1,3 +1,8 @@
+## 1.6.2
+
+- iOS: start standard location updates again alongside significant-change monitoring, so `distanceFilter` is honoured instead of the ~5 minute significant-change cadence.
+- Android: rebuild the location request from the saved interval/distance on every `startTracking`, not only when the service is created.
+
 ## 1.6.1 - 2025-07-17
 - Fixed callback being called once in Android (improved handling) (#91)
 - Fixed "FlutterJNI.loadLibrary/prefetchDefaultFontManager/init called more than once"

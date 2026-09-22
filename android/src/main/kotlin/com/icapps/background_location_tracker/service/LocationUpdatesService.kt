@@ -265,7 +265,9 @@ internal class LocationUpdatesService : Service() {
         // STEP 6: Acquire wake lock
         acquireWakeLock()
         
-        // STEP 7: Actually request location updates
+        // STEP 7: Actually request location updates. The request is rebuilt here because
+        // initialize() may have changed interval/distance since onCreate built it.
+        createLocationRequest()
         val requestResult = requestLocationUpdatesInternal()
         
         return when (requestResult) {
