@@ -144,20 +144,23 @@ internal object HealthCheck {
             ))
         }
         
+        // A foreground service of type location started while the app is visible keeps
+        // receiving fixes with while-in-use permission, so this must not block tracking.
         if (!permissionResult.hasBackgroundPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             issues.add(HealthIssue(
-                Severity.CRITICAL,
+                Severity.WARNING,
                 "no_background_permission",
-                "Background location permission not granted (Android 10+ required)",
+                "Background location permission not granted; tracking stops if the service is killed",
                 "Grant 'Allow all the time' permission in app settings"
             ))
         }
         
+        // Without POST_NOTIFICATIONS the foreground service still runs; only its notification is hidden.
         if (!permissionResult.hasNotificationPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             issues.add(HealthIssue(
-                Severity.CRITICAL,
+                Severity.WARNING,
                 "no_notification_permission",
-                "Notification permission required for background tracking (Android 13+)",
+                "Notification permission not granted; the tracking notification is hidden (Android 13+)",
                 "Grant notification permission in app settings"
             ))
         }
